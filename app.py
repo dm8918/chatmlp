@@ -1,4 +1,3 @@
-import os
 import streamlit as st
 from openai import OpenAI
 from databricks.sdk import WorkspaceClient
@@ -10,7 +9,9 @@ st.set_page_config(page_title="ChatMLP", layout="wide")
 st.title("ChatMLP")
 
 w = WorkspaceClient()
-token = w.config.authenticate()
+
+headers = w.config.authenticate()
+token = headers["Authorization"].replace("Bearer ", "")
 
 client = OpenAI(
     api_key=token,
