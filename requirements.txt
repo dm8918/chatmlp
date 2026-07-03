@@ -3,3 +3,4 @@ databricks-sdk
 pandas
 plotly
 requests
+openai
