@@ -25,20 +25,16 @@ if question:
 
     with st.chat_message("assistant"):
         with st.spinner("Consultando agente..."):
-            payload = {
-                "input": [
-                    {
-                        "role": "user",
-                        "content": question
-                    }
+            response = w.serving_endpoints.query(
+                name=ENDPOINT_NAME,
+                input=[
+                    {"role": "user", "content": question}
                 ]
-            }
-
-            result = w.api_client.do(
-                method="POST",
-                path=f"/api/2.0/serving-endpoints/{ENDPOINT_NAME}/invocations",
-                body=payload,
             )
+
+            result = response.as_dict()
+
+            st.json(result)
 
             answer = (
                 result.get("output")
