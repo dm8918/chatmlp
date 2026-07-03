@@ -1,6 +1,7 @@
 import os
 import streamlit as st
 from openai import OpenAI
+from databricks.sdk import WorkspaceClient
 
 ENDPOINT_NAME = "mas-f80ab72d-endpoint"
 BASE_URL = "https://adb-8849935324384487.7.azuredatabricks.net/serving-endpoints"
@@ -8,11 +9,8 @@ BASE_URL = "https://adb-8849935324384487.7.azuredatabricks.net/serving-endpoints
 st.set_page_config(page_title="ChatMLP", layout="wide")
 st.title("ChatMLP")
 
-token = os.environ.get("DATABRICKS_TOKEN")
-
-if not token:
-    st.error("Falta configurar la variable DATABRICKS_TOKEN en la Databricks App.")
-    st.stop()
+w = WorkspaceClient()
+token = w.config.authenticate()
 
 client = OpenAI(
     api_key=token,
