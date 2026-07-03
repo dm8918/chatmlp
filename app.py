@@ -4,6 +4,7 @@ from databricks.sdk import WorkspaceClient
 ENDPOINT_NAME = "mas-f80ab72d-endpoint"
 
 w = WorkspaceClient()
+client = w.serving_endpoints.get_open_ai_client()
 
 st.set_page_config(page_title="ChatMLP", layout="wide")
 st.title("ChatMLP")
@@ -16,15 +17,8 @@ if question:
 
     with st.chat_message("assistant"):
         with st.spinner("Consultando agente..."):
-            response = w.serving_endpoints.query(
-                name=ENDPOINT_NAME,
-                dataframe_records=[
-                    {
-                        "input": [
-                            {"role": "user", "content": question}
-                        ]
-                    }
-                ]
+            response = client.chat.completions.create(
+                model=ENDPOINT_NAME,
+                messages=[{"role": "user", "content": question}]
             )
-
-            st.write(response.as_dict())
+            st.write(response.choices[0].message.content)
