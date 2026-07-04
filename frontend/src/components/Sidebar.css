@@ -25,6 +25,8 @@
   height: 16px;
   width: auto;
   opacity: 0.95;
+  margin: 3px 35px;
+  padding: 1px 0;
 }
 
 .sidebar__new {
