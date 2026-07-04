@@ -19,4 +19,5 @@ export interface Conversation {
   id: string;
   title: string;
   timestamp: string;
+  messages: Message[];
 }
