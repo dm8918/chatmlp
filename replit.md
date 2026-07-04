@@ -34,9 +34,14 @@ Two workflows run in parallel:
 
 1. Build the front-end: `npm run build --prefix frontend` (outputs `frontend/dist`).
 2. Upload the project files to the workspace folder and select it as the App source.
+   **`frontend/dist` MUST be included** — Databricks Apps only run uvicorn and do
+   NOT build the front-end. If `dist` is missing, the backend has no static files
+   to serve at `/` and returns `{"detail":"Not Found"}`. For this reason
+   `frontend/dist` is intentionally NOT gitignored so it ships with the deploy.
 3. `app.yaml` runs `uvicorn backend.main:app`, which serves both the API and the
-   built React app. The serving endpoint and workspace host are configured in
-   `backend/main.py` (`ENDPOINT_NAME`, `BASE_URL`).
+   built React app. The serving endpoint is configured in `backend/main.py`
+   (`ENDPOINT_NAME`); the workspace host / base URL is resolved automatically by
+   the Databricks SDK on the App.
 4. Grant the App's service principal permission to query the endpoint.
 
 ## User preferences

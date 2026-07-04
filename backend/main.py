@@ -118,6 +118,19 @@ def chat(req: ChatRequest):
 
 
 # Serve the built React app in production (e.g. on a Databricks App).
+# NOTE: the frontend must be built (`npm run build --prefix frontend`) and the
+# resulting `frontend/dist` folder must be included in what is uploaded to the
+# App. Databricks Apps only run uvicorn; they do NOT build the front-end.
 _DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 if os.path.isdir(_DIST):
     app.mount("/", StaticFiles(directory=_DIST, html=True), name="static")
+else:
+    @app.get("/")
+    def _missing_frontend():
+        return {
+            "detail": (
+                "Frontend build not found. Run 'npm run build --prefix frontend' "
+                "and make sure the 'frontend/dist' folder is deployed alongside "
+                "the backend. The API itself is running: try /api/health."
+            )
+        }
