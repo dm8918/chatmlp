@@ -1,12 +1,12 @@
 import os
-from functools import lru_cache
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+# Name of the Databricks serving endpoint (used as the model id). The workspace
+# host / base URL is resolved automatically by the SDK on a Databricks App.
 ENDPOINT_NAME = "mas-f80ab72d-endpoint"
-BASE_URL = "https://adb-8849935324384487.7.azuredatabricks.net/serving-endpoints"
 
 app = FastAPI(title="ChatMLP API")
 
@@ -20,22 +20,33 @@ class ChatRequest(BaseModel):
     messages: list[Message]
 
 
-@lru_cache(maxsize=1)
+_client = None
+
+
 def get_client():
-    """Create the OpenAI client pointed at the Databricks serving endpoint.
+    """Return an OpenAI client pointed at the Databricks serving endpoint.
 
     On a Databricks App, auth is automatic via the service principal's OAuth
-    (M2M). On Replit / local there are usually no credentials, so we return
-    None and the API answers in demo mode.
+    (M2M). We use the SDK's ``get_open_ai_client`` helper, which refreshes the
+    short-lived OAuth token automatically on every request, so a long-running
+    App does not break when the initial token expires.
+
+    The successful client is cached, but failures are NOT cached: a transient
+    error on startup must not pin the app into demo mode forever. On Replit /
+    local there are usually no credentials, so this returns None and the API
+    answers in demo mode.
     """
+    global _client
+    if _client is not None:
+        return _client
     try:
-        from openai import OpenAI
         from databricks.sdk import WorkspaceClient
 
         w = WorkspaceClient()
-        headers = w.config.authenticate()
-        token = headers["Authorization"].replace("Bearer ", "")
-        return OpenAI(api_key=token, base_url=BASE_URL)
+        # Fail fast if there are no usable credentials (local/demo).
+        w.config.authenticate()
+        _client = w.serving_endpoints.get_open_ai_client()
+        return _client
     except Exception:
         return None
 

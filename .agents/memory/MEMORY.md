@@ -1,0 +1,1 @@
+- [Databricks Apps auth](databricks-apps-auth.md) — use SDK `get_open_ai_client()` (auto-refresh), never a captured token; cache only successful clients, never failures.
