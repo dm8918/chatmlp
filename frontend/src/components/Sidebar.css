@@ -17,8 +17,10 @@
 
 .sidebar__brand-name {
   font-size: 20px;
-  font-weight: 500;
+  font-weight: 700;
   letter-spacing: 0.2px;
+  text-align: right;
+  margin-bottom: 5px;
 }
 
 .sidebar__brand-logo {
