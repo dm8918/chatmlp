@@ -60,7 +60,22 @@ def health():
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
-    client = get_client()
+    try:
+        client = get_client()
+    except Exception:
+        # No Databricks credentials (e.g. running locally on Replit). The agent
+        # only answers when deployed as a Databricks App, where OAuth is
+        # automatic. This is NOT a demo response — it is an explicit offline state.
+        return {
+            "role": "assistant",
+            "type": "text",
+            "content": (
+                "Sin conexión al agente de Databricks. Cerebro responde con datos "
+                "reales al desplegarse como Databricks App (autenticación automática "
+                "del service principal)."
+            ),
+        }
+
     response = client.responses.create(
         model=ENDPOINT_NAME,
         input=[m.model_dump() for m in req.messages],

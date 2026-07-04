@@ -58,7 +58,6 @@ externalPort = 8000
 [userenv]
 
 [userenv.shared]
-DATABRICKS_HOST = "https://adb-8849935324384487.7.azuredatabricks.net"
 
 [deployment]
 deploymentTarget = "autoscale"
