@@ -22,6 +22,26 @@
   color: var(--text);
 }
 
+[data-theme="dark"] {
+  --sidebar-bg: #1f2a30;
+  --sidebar-bg-hover: rgba(255, 255, 255, 0.06);
+  --sidebar-bg-active: rgba(255, 255, 255, 0.1);
+  --sidebar-text: #e6edf0;
+  --sidebar-muted: #8b9ba3;
+  --sidebar-border: rgba(255, 255, 255, 0.08);
+
+  --teal: #4a8496;
+  --teal-dark: #3d6f7e;
+  --teal-soft: #26343b;
+
+  --bg: #131a1f;
+  --card: #1c262c;
+  --border: #2c3941;
+  --text: #e6edf0;
+  --text-muted: #9fb0b8;
+  --table-header: #232f36;
+}
+
 * {
   box-sizing: border-box;
 }

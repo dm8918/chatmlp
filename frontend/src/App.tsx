@@ -7,15 +7,28 @@ import { sendChat } from "./api";
 import type { Message } from "./types";
 import "./App.css";
 
+type Theme = "light" | "dark";
+
 export default function App() {
   const [activeId, setActiveId] = useState(conversations[0].id);
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [loading, setLoading] = useState(false);
+  const [theme, setTheme] = useState<Theme>(
+    () => (localStorage.getItem("theme") as Theme) || "light",
+  );
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+
+  const toggleTheme = () =>
+    setTheme((t) => (t === "light" ? "dark" : "light"));
 
   const handleSend = async (text: string) => {
     const userMsg: Message = { role: "user", type: "text", content: text };
@@ -52,6 +65,8 @@ export default function App() {
         activeId={activeId}
         onSelect={setActiveId}
         onNew={handleNew}
+        theme={theme}
+        onToggleTheme={toggleTheme}
       />
 
       <main className="chat">
