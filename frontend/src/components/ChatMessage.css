@@ -1,0 +1,34 @@
+.msg {
+  display: flex;
+  margin-bottom: 22px;
+}
+
+.msg--user {
+  justify-content: flex-end;
+}
+
+.msg__bubble {
+  background: var(--teal);
+  color: #fff;
+  padding: 13px 18px;
+  border-radius: 16px 16px 4px 16px;
+  max-width: 620px;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.msg--assistant {
+  justify-content: flex-start;
+}
+
+.msg__text {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 14px 18px;
+  border-radius: 16px 16px 16px 4px;
+  max-width: 720px;
+  font-size: 15px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}

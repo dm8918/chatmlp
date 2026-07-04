@@ -1,13 +1,4 @@
-streamlit
-databricks-sdk
-pandas
-plotly
-requests
-openai
-databricks
+fastapi
+uvicorn[standard]
 databricks-sdk
 openai
-pandas
-plotly
-requests
-streamlit
