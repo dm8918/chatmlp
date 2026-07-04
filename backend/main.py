@@ -1,5 +1,7 @@
+from openai import OpenAI
+from databricks.sdk import WorkspaceClient
 import os
-
+import logging
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -7,9 +9,12 @@ from pydantic import BaseModel
 # Name of the Databricks serving endpoint (used as the model id). The workspace
 # host / base URL is resolved automatically by the SDK: on a Databricks App via
 # the service principal's OAuth, and locally via DATABRICKS_HOST / DATABRICKS_TOKEN.
-ENDPOINT_NAME = "mas-f80ab72d-endpoint"
+
+logger = logging.getLogger("chatmlp")
 
 app = FastAPI(title="ChatMLP API")
+
+ENDPOINT_NAME = "mas-f80ab72d-endpoint"
 
 
 class Message(BaseModel):
@@ -21,51 +26,45 @@ class ChatRequest(BaseModel):
     messages: list[Message]
 
 
-_client = None
-
-
 def get_client():
-    """Return an OpenAI client pointed at the Databricks serving endpoint.
-
-    On a Databricks App, auth is automatic via the service principal's OAuth
-    (M2M). Locally, the Databricks SDK reads ``DATABRICKS_HOST`` and
-    ``DATABRICKS_TOKEN`` from the environment. In both cases we use the SDK's
-    ``get_open_ai_client`` helper, which refreshes the short-lived OAuth token
-    automatically on every request so a long-running App does not break when the
-    initial token expires.
-
-    The successful client is cached; failures are NOT cached so a transient
-    startup error does not pin the app into a broken state forever.
-    """
-    global _client
-    if _client is not None:
-        return _client
-    from databricks.sdk import WorkspaceClient
-
+    # WorkspaceClient resuelve host/credenciales solo (OAuth en App, env vars local).
+    # El token OAuth expira (~1h), por eso se crea per-request y no se cachea.
     w = WorkspaceClient()
-    # Fail fast (raises) if there are no usable credentials.
-    w.config.authenticate()
-    _client = w.serving_endpoints.get_open_ai_client()
-    return _client
 
+    headers = w.config.authenticate()
+    token = headers["Authorization"].replace("Bearer ", "")
+
+    client = OpenAI(
+        api_key=token,
+        base_url=f"{w.config.host}/serving-endpoints",  # derivado, no hardcodeado
+    )
+    return client
+
+
+def get_response(client, input_msg):
+    response = client.responses.create(
+        model=ENDPOINT_NAME,
+        input=input_msg,
+    )
+    return response  # FIX: faltaba el return
+
+
+# API
 
 @app.get("/api/health")
 def health():
-    try:
-        get_client()
-        return {"status": "ok", "connected": True}
-    except Exception as exc:
-        return {"status": "ok", "connected": False, "detail": str(exc)}
+    return {"status": "ok"}
 
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
     try:
         client = get_client()
-    except Exception:
+    except Exception as e:
         # No Databricks credentials (e.g. running locally on Replit). The agent
         # only answers when deployed as a Databricks App, where OAuth is
         # automatic. This is NOT a demo response — it is an explicit offline state.
+        logger.warning("Sin credenciales Databricks: %s", e)
         return {
             "role": "assistant",
             "type": "text",
@@ -76,10 +75,8 @@ def chat(req: ChatRequest):
             ),
         }
 
-    response = client.responses.create(
-        model=ENDPOINT_NAME,
-        input=[m.model_dump() for m in req.messages],
-    )
+    response = get_response(client, [m.model_dump() for m in req.messages])
+
     answer = " ".join(
         getattr(content, "text", "")
         for output in response.output
@@ -88,7 +85,6 @@ def chat(req: ChatRequest):
     return {"role": "assistant", "type": "text", "content": answer}
 
 
-# Serve the built React app in production (e.g. on a Databricks App).
 # NOTE: the frontend must be built (`npm run build --prefix frontend`) and the
 # resulting `frontend/dist` folder must be included in what is uploaded to the
 # App. Databricks Apps only run uvicorn; they do NOT build the front-end.
@@ -105,3 +101,5 @@ else:
                 "the backend. The API itself is running: try /api/health."
             )
         }
+
+
