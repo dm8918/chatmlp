@@ -2,15 +2,17 @@ import { useEffect, useRef, useState } from "react";
 import Sidebar from "./components/Sidebar";
 import ChatMessage from "./components/ChatMessage";
 import ChatInput from "./components/ChatInput";
-import { conversations, initialMessages } from "./data";
+import { conversations as initialConversations, initialMessages } from "./data";
 import { sendChat } from "./api";
-import type { Message } from "./types";
+import type { Conversation, Message } from "./types";
 import "./App.css";
 
 type Theme = "light" | "dark";
 
 export default function App() {
-  const [activeId, setActiveId] = useState(conversations[0].id);
+  const [conversations, setConversations] =
+    useState<Conversation[]>(initialConversations);
+  const [activeId, setActiveId] = useState(initialConversations[0].id);
   const [messages, setMessages] = useState<Message[]>(initialMessages);
   const [loading, setLoading] = useState(false);
   const [theme, setTheme] = useState<Theme>(
@@ -58,6 +60,17 @@ export default function App() {
     setMessages([]);
   };
 
+  const handleDelete = (id: string) => {
+    setConversations((prev) => {
+      const next = prev.filter((c) => c.id !== id);
+      if (id === activeId) {
+        setActiveId(next[0]?.id ?? "");
+        setMessages([]);
+      }
+      return next;
+    });
+  };
+
   return (
     <div className="app">
       <Sidebar
@@ -65,6 +78,7 @@ export default function App() {
         activeId={activeId}
         onSelect={setActiveId}
         onNew={handleNew}
+        onDelete={handleDelete}
         theme={theme}
         onToggleTheme={toggleTheme}
       />

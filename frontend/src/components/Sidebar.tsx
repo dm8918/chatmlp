@@ -7,6 +7,7 @@ interface Props {
   activeId: string;
   onSelect: (id: string) => void;
   onNew: () => void;
+  onDelete: (id: string) => void;
   theme: "light" | "dark";
   onToggleTheme: () => void;
 }
@@ -16,6 +17,7 @@ export default function Sidebar({
   activeId,
   onSelect,
   onNew,
+  onDelete,
   theme,
   onToggleTheme,
 }: Props) {
@@ -39,15 +41,35 @@ export default function Sidebar({
 
       <nav className="sidebar__history">
         {conversations.map((c) => (
-          <button
+          <div
             key={c.id}
             className={`sidebar__item ${c.id === activeId ? "is-active" : ""}`}
-            onClick={() => onSelect(c.id)}
           >
-            <span className="sidebar__item-title">{c.title}</span>
-            <span className="sidebar__item-time">{c.timestamp}</span>
-          </button>
+            <button
+              className="sidebar__item-main"
+              onClick={() => onSelect(c.id)}
+            >
+              <span className="sidebar__item-title">{c.title}</span>
+              <span className="sidebar__item-time">{c.timestamp}</span>
+            </button>
+            <button
+              className="sidebar__item-delete"
+              aria-label="Borrar conversación"
+              title="Borrar conversación"
+              onClick={() => onDelete(c.id)}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 6h18" />
+                <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                <path d="M10 11v6M14 11v6" />
+              </svg>
+            </button>
+          </div>
         ))}
+        {conversations.length === 0 && (
+          <p className="sidebar__history-empty">No hay conversaciones.</p>
+        )}
       </nav>
 
       <div className="sidebar__theme">
