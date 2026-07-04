@@ -4,3 +4,10 @@ pandas
 plotly
 requests
 openai
+databricks
+databricks-sdk
+openai
+pandas
+plotly
+requests
+streamlit
