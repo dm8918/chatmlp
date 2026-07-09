@@ -75,14 +75,23 @@ def chat(req: ChatRequest):
             ),
         }
 
-    response = get_response(client, [m.model_dump() for m in req.messages])
-
-    answer = " ".join(
-        getattr(content, "text", "")
-        for output in response.output
-        for content in getattr(output, "content", [])
-    )
-    return {"role": "assistant", "type": "text", "content": answer}
+    try:
+        response = get_response(client, [m.model_dump() for m in req.messages])
+        answer = " ".join(
+            getattr(content, "text", "")
+            for output in response.output
+            for content in getattr(output, "content", [])
+        )
+        return {"role": "assistant", "type": "text", "content": answer}
+    except Exception as e:
+        # Surface the real error (e.g. permission denied on the endpoint,
+        # endpoint not found, bad payload) instead of an opaque 500.
+        logger.exception("Error consultando el endpoint %s", ENDPOINT_NAME)
+        return {
+            "role": "assistant",
+            "type": "text",
+            "content": f"Error consultando el agente ({ENDPOINT_NAME}): {e}",
+        }
 
 
 # NOTE: the frontend must be built (`npm run build --prefix frontend`) and the
