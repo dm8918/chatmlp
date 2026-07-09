@@ -18,6 +18,12 @@ export default function ChatMessage({ message }: { message: Message }) {
       ) : (
         <div className="msg__text">{message.content}</div>
       )}
+      {message.trace && message.trace.length > 0 && (
+        <details className="msg__trace">
+          <summary>Ver seguimiento ({message.trace.length} etapas)</summary>
+          <pre>{message.trace.join("\n")}</pre>
+        </details>
+      )}
     </div>
   );
 }

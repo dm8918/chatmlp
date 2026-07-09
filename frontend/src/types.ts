@@ -12,8 +12,13 @@ export interface StructuredContent {
 
 export type Message =
   | { role: "user"; type: "text"; content: string }
-  | { role: "assistant"; type: "text"; content: string }
-  | { role: "assistant"; type: "structured"; content: StructuredContent };
+  | { role: "assistant"; type: "text"; content: string; trace?: string[] }
+  | {
+      role: "assistant";
+      type: "structured";
+      content: StructuredContent;
+      trace?: string[];
+    };
 
 export interface Conversation {
   id: string;

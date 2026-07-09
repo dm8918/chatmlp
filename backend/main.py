@@ -60,7 +60,7 @@ class NoCredentialsError(Exception):
     """Raised when no Databricks credentials are available (local/offline)."""
 
 
-def query_agent(messages: list[dict]) -> str:
+def query_agent(messages: list[dict], trace: list[str]) -> str:
     """POST directly to the serving endpoint's /invocations URL.
 
     Auth is handled by the Databricks SDK (OAuth on a Databricks App, env vars
@@ -70,32 +70,54 @@ def query_agent(messages: list[dict]) -> str:
     Agent Bricks (mas-*) endpoints expect the Responses API schema
     ``{"input": [...]}``; other agents expect ``{"messages": [...]}``. We try
     ``input`` first and fall back to ``messages`` if the endpoint rejects it.
+
+    ``trace`` is mutated with a human-readable log of each stage so the
+    front-end can show what was sent and received.
     """
     try:
         w = WorkspaceClient()
         auth_headers = w.config.authenticate()
+        trace.append(
+            f"1. Autenticación OK (método: {w.config.auth_type}, host: {w.config.host})"
+        )
     except Exception as e:
+        trace.append(f"1. Autenticación FALLÓ: {str(e)[:300]}")
         raise NoCredentialsError(str(e)) from e
 
     url = f"{w.config.host.rstrip('/')}/serving-endpoints/{ENDPOINT_NAME}/invocations"
     headers = {**auth_headers, "Content-Type": "application/json"}
 
     last_error = None
-    for payload in ({"input": messages}, {"messages": messages}):
+    for schema, payload in (("input", {"input": messages}), ("messages", {"messages": messages})):
+        body = json.dumps(payload, ensure_ascii=False)
+        trace.append(f"2. POST {url}")
+        trace.append(f"   Enviado (esquema '{schema}'): {body[:600]}")
         resp = requests.post(url, headers=headers, json=payload, timeout=120)
+        trace.append(
+            f"3. Respuesta HTTP {resp.status_code} en {resp.elapsed.total_seconds():.1f}s"
+        )
+        trace.append(f"   Recibido: {resp.text[:600]}")
         if resp.status_code == 200:
             try:
                 data = resp.json()
             except ValueError:
+                trace.append("4. ERROR: el cuerpo no es JSON válido")
                 raise RuntimeError(
                     f"El endpoint no devolvió JSON (HTTP {resp.status_code}): "
                     f"{resp.text[:400]}"
                 )
-            return _extract_answer(data)
+            answer = _extract_answer(data)
+            trace.append("4. Texto extraído correctamente")
+            return answer
         last_error = f"HTTP {resp.status_code}: {resp.text[:400]}"
         # Only retry with the alternate schema on client-side schema errors.
         if resp.status_code not in (400, 422):
             break
+        if schema == "input":
+            trace.append(
+                f"   Esquema '{schema}' rechazado; reintentando con el otro esquema…"
+            )
+    trace.append("4. ERROR: el endpoint no aceptó la solicitud")
     raise RuntimeError(last_error)
 
 
@@ -109,10 +131,11 @@ def health():
 @app.post("/api/chat")
 def chat(req: ChatRequest):
     payload = [m.model_dump() for m in req.messages]
+    trace: list[str] = [f"0. Endpoint destino: {ENDPOINT_NAME}"]
 
     try:
-        answer = query_agent(payload)
-        return {"role": "assistant", "type": "text", "content": answer}
+        answer = query_agent(payload, trace)
+        return {"role": "assistant", "type": "text", "content": answer, "trace": trace}
     except NoCredentialsError as e:
         # No Databricks credentials (e.g. running locally on Replit). The agent
         # only answers when deployed as a Databricks App, where OAuth is
@@ -126,6 +149,7 @@ def chat(req: ChatRequest):
                 "reales al desplegarse como Databricks App (autenticación automática "
                 "del service principal)."
             ),
+            "trace": trace,
         }
     except Exception as e:
         # Surface the real error (HTTP status + body from the endpoint) instead
@@ -135,6 +159,7 @@ def chat(req: ChatRequest):
             "role": "assistant",
             "type": "text",
             "content": f"Error consultando el agente ({ENDPOINT_NAME}): {e}",
+            "trace": trace,
         }
 
 

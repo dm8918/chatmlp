@@ -43,9 +43,24 @@ function sanitizeConversations(raw: unknown): Conversation[] | null {
       title: typeof c.title === "string" ? c.title : NEW_TITLE,
       timestamp: typeof c.timestamp === "string" ? c.timestamp : formatTimestamp(),
       messages: Array.isArray(c.messages)
-        ? (c.messages.filter(
-            (m) => m && typeof m === "object" && "role" in m && "type" in m,
-          ) as Message[])
+        ? (c.messages
+            .filter(
+              (m) => m && typeof m === "object" && "role" in m && "type" in m,
+            )
+            .map((m) => {
+              const msg = m as Record<string, unknown>;
+              if (
+                "trace" in msg &&
+                !(
+                  Array.isArray(msg.trace) &&
+                  msg.trace.every((t) => typeof t === "string")
+                )
+              ) {
+                const { trace: _drop, ...rest } = msg;
+                return rest;
+              }
+              return msg;
+            }) as Message[])
         : [],
     });
   }
