@@ -350,7 +350,10 @@ def ask_databricks_agent(messages: list[dict], trace: list[str]) -> str:
         trace.append("5. ERROR: el agente no devolvió texto")
         raise RuntimeError("El agente no devolvió texto en la respuesta.")
 
-    trace.append("5. Respuesta final extraída correctamente")
+    trace.append(
+        f"5. Respuesta final extraída correctamente: {parsed['answer'][:200]}"
+        + ("…" if len(parsed["answer"]) > 200 else "")
+    )
     return parsed["answer"]
 
 
