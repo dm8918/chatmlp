@@ -12,7 +12,13 @@ export interface StructuredContent {
 
 export type Message =
   | { role: "user"; type: "text"; content: string }
-  | { role: "assistant"; type: "text"; content: string; trace?: string[] }
+  | {
+      role: "assistant";
+      type: "text";
+      content: string;
+      trace?: string[];
+      isError?: boolean;
+    }
   | {
       role: "assistant";
       type: "structured";

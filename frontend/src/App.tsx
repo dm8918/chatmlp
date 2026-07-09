@@ -183,6 +183,7 @@ export default function App() {
         content: `No se pudo obtener respuesta: ${
           err instanceof Error ? err.message : "error desconocido"
         }`,
+        isError: true,
       });
     } finally {
       setLoading(false);

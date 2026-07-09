@@ -35,6 +35,24 @@ class ChatRequest(BaseModel):
     messages: list[Message]
 
 
+# Error messages produced by this backend / the frontend. They must never be
+# echoed back to the agent as conversation history (they pollute the context).
+_ERROR_PREFIXES = (
+    "Error consultando el agente",
+    "No se pudo obtener respuesta",
+    "Sin conexión al agente de Databricks",
+    "El agente intentó llamar una herramienta",
+    "El agente solo devolvió texto intermedio",
+    "El agente no devolvió texto",
+)
+
+
+def is_error_message(msg: dict) -> bool:
+    return msg.get("role") == "assistant" and str(msg.get("content", "")).startswith(
+        _ERROR_PREFIXES
+    )
+
+
 class NoCredentialsError(Exception):
     """Raised when no Databricks credentials are available (local/offline)."""
 
@@ -134,6 +152,26 @@ def is_weak_intermediate_text(text: str) -> bool:
     return any(lower.startswith(x) for x in WEAK_STARTS)
 
 
+def looks_like_tool_echo(text: str) -> bool:
+    """Detect tool-output echoes that must never count as a final answer:
+    XML-like tags (<name>...</name>), raw JSON/array dumps, etc."""
+    stripped = text.strip()
+    if not stripped:
+        return True
+    if stripped.startswith("<"):
+        return True
+    if stripped.startswith(("{", "[")):
+        try:
+            json.loads(stripped)
+            return True
+        except ValueError:
+            # Even if it isn't valid JSON, a text that both starts and ends
+            # with brackets/braces is a structured dump, not an answer.
+            if stripped[-1] in ("}", "]"):
+                return True
+    return False
+
+
 def parse_sse_error(text: str):
     """Databricks can return HTTP 200 with an SSE error block:
     event: error
@@ -182,10 +220,17 @@ def extract_final_answer(data: dict) -> dict:
                         texts.append(txt)
 
     # Only substantive text counts as a final answer. Weak intermediate
-    # snippets ("Voy a consultar...") are NEVER returned as the final answer.
-    substantive = [t for t in texts if not is_weak_intermediate_text(t)]
-    answer = "\n".join(substantive).strip()
-    has_final_answer = bool(substantive)
+    # snippets ("Voy a consultar...") and tool-output echoes
+    # (<name>...</name>, JSON dumps) are NEVER returned as the final answer.
+    # The agent narrates progress between tool calls, so the FINAL answer is
+    # the LAST substantive text — never the concatenation of every snippet.
+    substantive = [
+        t
+        for t in texts
+        if not is_weak_intermediate_text(t) and not looks_like_tool_echo(t)
+    ]
+    answer = substantive[-1].strip() if substantive else ""
+    has_final_answer = bool(answer)
 
     return {
         "answer": answer,
@@ -330,8 +375,13 @@ def health():
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
-    payload = [m.model_dump() for m in req.messages]
+    payload = [
+        msg for msg in (m.model_dump() for m in req.messages) if not is_error_message(msg)
+    ]
     trace: list[str] = [f"0. Endpoint destino: {agent_endpoint()} (vía Responses API)"]
+    dropped = len(req.messages) - len(payload)
+    if dropped:
+        trace.append(f"   ({dropped} mensaje(s) de error previos excluidos del contexto)")
 
     try:
         answer = ask_databricks_agent(payload, trace)
@@ -347,6 +397,7 @@ def chat(req: ChatRequest):
                 "del service principal)."
             ),
             "trace": trace,
+            "isError": True,
         }
     except Exception as e:
         logger.exception("Error consultando el endpoint %s", agent_endpoint())
@@ -355,6 +406,7 @@ def chat(req: ChatRequest):
             "type": "text",
             "content": f"Error consultando el agente ({agent_endpoint()}): {e}",
             "trace": trace,
+            "isError": True,
         }
 
 
