@@ -1,20 +1,21 @@
-from openai import OpenAI
-from databricks.sdk import WorkspaceClient
-import os
+import json
 import logging
+import os
+
+import requests
+from databricks.sdk import WorkspaceClient
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# Name of the Databricks serving endpoint (used as the model id). The workspace
-# host / base URL is resolved automatically by the SDK: on a Databricks App via
-# the service principal's OAuth, and locally via DATABRICKS_HOST / DATABRICKS_TOKEN.
+# Name of the Databricks serving endpoint. The workspace host is resolved
+# automatically by the SDK: on a Databricks App via the service principal's
+# OAuth, and locally via DATABRICKS_HOST / DATABRICKS_TOKEN.
+ENDPOINT_NAME = "mas-c7a80bc8-endpoint"
 
 logger = logging.getLogger("chatmlp")
 
 app = FastAPI(title="ChatMLP API")
-
-ENDPOINT_NAME = "mas-c7a80bc8-endpoint"
 
 
 class Message(BaseModel):
@@ -26,27 +27,76 @@ class ChatRequest(BaseModel):
     messages: list[Message]
 
 
-def get_client():
-    # WorkspaceClient resuelve host/credenciales solo (OAuth en App, env vars local).
-    # El token OAuth expira (~1h), por eso se crea per-request y no se cachea.
-    w = WorkspaceClient()
+def _extract_answer(data: dict) -> str:
+    """Extract the assistant text from the possible agent response shapes."""
+    # Responses API shape: {"output": [{"content": [{"type": "output_text", "text": ...}]}]}
+    if isinstance(data.get("output"), list):
+        parts = []
+        for output in data["output"]:
+            for content in output.get("content", []) if isinstance(output, dict) else []:
+                if isinstance(content, dict) and content.get("text"):
+                    parts.append(content["text"])
+        if parts:
+            return " ".join(parts)
 
-    headers = w.config.authenticate()
-    token = headers["Authorization"].replace("Bearer ", "")
+    # ChatAgent shape: {"messages": [..., {"role": "assistant", "content": ...}]}
+    if isinstance(data.get("messages"), list):
+        for msg in reversed(data["messages"]):
+            if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("content"):
+                return str(msg["content"])
 
-    client = OpenAI(
-        api_key=token,
-        base_url=f"{w.config.host}/serving-endpoints",  # derivado, no hardcodeado
+    # Chat completions shape: {"choices": [{"message": {"content": ...}}]}
+    if isinstance(data.get("choices"), list) and data["choices"]:
+        message = data["choices"][0].get("message", {})
+        if message.get("content"):
+            return str(message["content"])
+
+    raise RuntimeError(
+        f"Formato de respuesta no reconocido: {json.dumps(data)[:400]}"
     )
-    return client
 
 
-def get_response(client, input_msg):
-    response = client.responses.create(
-        model=ENDPOINT_NAME,
-        input=input_msg,
-    )
-    return response  # FIX: faltaba el return
+class NoCredentialsError(Exception):
+    """Raised when no Databricks credentials are available (local/offline)."""
+
+
+def query_agent(messages: list[dict]) -> str:
+    """POST directly to the serving endpoint's /invocations URL.
+
+    Auth is handled by the Databricks SDK (OAuth on a Databricks App, env vars
+    locally). The OAuth token expires (~1h), so credentials are resolved
+    per-request and never cached.
+
+    Agent Bricks (mas-*) endpoints expect the Responses API schema
+    ``{"input": [...]}``; other agents expect ``{"messages": [...]}``. We try
+    ``input`` first and fall back to ``messages`` if the endpoint rejects it.
+    """
+    try:
+        w = WorkspaceClient()
+        auth_headers = w.config.authenticate()
+    except Exception as e:
+        raise NoCredentialsError(str(e)) from e
+
+    url = f"{w.config.host.rstrip('/')}/serving-endpoints/{ENDPOINT_NAME}/invocations"
+    headers = {**auth_headers, "Content-Type": "application/json"}
+
+    last_error = None
+    for payload in ({"input": messages}, {"messages": messages}):
+        resp = requests.post(url, headers=headers, json=payload, timeout=120)
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+            except ValueError:
+                raise RuntimeError(
+                    f"El endpoint no devolvió JSON (HTTP {resp.status_code}): "
+                    f"{resp.text[:400]}"
+                )
+            return _extract_answer(data)
+        last_error = f"HTTP {resp.status_code}: {resp.text[:400]}"
+        # Only retry with the alternate schema on client-side schema errors.
+        if resp.status_code not in (400, 422):
+            break
+    raise RuntimeError(last_error)
 
 
 # API
@@ -58,9 +108,12 @@ def health():
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
+    payload = [m.model_dump() for m in req.messages]
+
     try:
-        client = get_client()
-    except Exception as e:
+        answer = query_agent(payload)
+        return {"role": "assistant", "type": "text", "content": answer}
+    except NoCredentialsError as e:
         # No Databricks credentials (e.g. running locally on Replit). The agent
         # only answers when deployed as a Databricks App, where OAuth is
         # automatic. This is NOT a demo response — it is an explicit offline state.
@@ -74,18 +127,9 @@ def chat(req: ChatRequest):
                 "del service principal)."
             ),
         }
-
-    try:
-        response = get_response(client, [m.model_dump() for m in req.messages])
-        answer = " ".join(
-            getattr(content, "text", "")
-            for output in response.output
-            for content in getattr(output, "content", [])
-        )
-        return {"role": "assistant", "type": "text", "content": answer}
     except Exception as e:
-        # Surface the real error (e.g. permission denied on the endpoint,
-        # endpoint not found, bad payload) instead of an opaque 500.
+        # Surface the real error (HTTP status + body from the endpoint) instead
+        # of an opaque 500, so problems like missing permissions are visible.
         logger.exception("Error consultando el endpoint %s", ENDPOINT_NAME)
         return {
             "role": "assistant",
@@ -110,5 +154,3 @@ else:
                 "the backend. The API itself is running: try /api/health."
             )
         }
-
-
