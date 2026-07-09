@@ -1,0 +1,207 @@
+import os
+import time
+import base64
+import requests
+
+DATABRICKS_HOST = os.environ["DATABRICKS_HOST"].rstrip("/")
+DATABRICKS_CLIENT_ID = os.environ["DATABRICKS_CLIENT_ID"]
+DATABRICKS_CLIENT_SECRET = os.environ["DATABRICKS_CLIENT_SECRET"]
+DATABRICKS_AGENT_ENDPOINT = os.environ.get(
+    "DATABRICKS_AGENT_ENDPOINT",
+    "mas-c7a80bc8-endpoint"
+)
+
+_token_cache = {
+    "access_token": None,
+    "expires_at": 0,
+}
+
+
+def get_databricks_token() -> str:
+    now = time.time()
+
+    if _token_cache["access_token"] and now < _token_cache["expires_at"] - 60:
+        return _token_cache["access_token"]
+
+    token_url = f"{DATABRICKS_HOST}/oidc/v1/token"
+
+    basic = base64.b64encode(
+        f"{DATABRICKS_CLIENT_ID}:{DATABRICKS_CLIENT_SECRET}".encode()
+    ).decode()
+
+    headers = {
+        "Authorization": f"Basic {basic}",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+    data = {
+        "grant_type": "client_credentials",
+        "scope": "all-apis",
+    }
+
+    response = requests.post(token_url, headers=headers, data=data, timeout=30)
+    response.raise_for_status()
+
+    token_data = response.json()
+
+    _token_cache["access_token"] = token_data["access_token"]
+    _token_cache["expires_at"] = now + int(token_data.get("expires_in", 3600))
+
+    return _token_cache["access_token"]
+
+
+def parse_sse_error(text: str):
+    """
+    Databricks a veces puede devolver HTTP 200 con:
+    event: error
+    data: {"error_code": "...", "message": "..."}
+    """
+    if "event: error" not in text:
+        return None
+
+    for line in text.splitlines():
+        if line.startswith("data:"):
+            return line.replace("data:", "", 1).strip()
+
+    return text
+
+
+def is_weak_intermediate_text(text: str) -> bool:
+    lower = text.strip().lower()
+    weak_starts = [
+        "voy a consultar",
+        "déjame consultar",
+        "voy a buscar",
+        "buscaré",
+        "consultaré",
+    ]
+    return any(lower.startswith(x) for x in weak_starts)
+
+
+def extract_final_answer(data: dict) -> dict:
+    outputs = data.get("output", [])
+
+    texts = []
+    function_calls = []
+
+    for item in outputs:
+        item_type = item.get("type")
+
+        if item_type == "function_call":
+            function_calls.append(item)
+
+        if item_type == "message" and item.get("role") == "assistant":
+            for content in item.get("content", []):
+                if content.get("type") in ("output_text", "text"):
+                    txt = content.get("text", "").strip()
+                    if txt:
+                        texts.append(txt)
+
+    answer = "\n".join(texts).strip()
+
+    has_final_answer = bool(answer) and not is_weak_intermediate_text(answer)
+
+    return {
+        "answer": answer,
+        "has_final_answer": has_final_answer,
+        "function_call_count": len(function_calls),
+        "raw_output_count": len(outputs),
+    }
+
+
+def ask_databricks_agent(user_message: str) -> dict:
+    token = get_databricks_token()
+
+    url = f"{DATABRICKS_HOST}/serving-endpoints/responses"
+
+    payload = {
+        "model": DATABRICKS_AGENT_ENDPOINT,
+        "input": [
+            {
+                "role": "user",
+                "content": user_message,
+            }
+        ],
+        "stream": False,
+        "databricks_options": {
+            "return_trace": True,
+        },
+    }
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "x-mlflow-return-trace-id": "true",
+    }
+
+    response = requests.post(url, headers=headers, json=payload, timeout=120)
+
+    content_type = response.headers.get("content-type", "")
+    trace_id = response.headers.get("x-mlflow-trace-id")
+
+    raw_text = response.text
+
+    sse_error = parse_sse_error(raw_text)
+    if sse_error:
+        return {
+            "ok": False,
+            "answer": None,
+            "error": f"Databricks devolvió error SSE: {sse_error}",
+            "status_code": response.status_code,
+            "trace_id": trace_id,
+        }
+
+    if response.status_code >= 400:
+        return {
+            "ok": False,
+            "answer": None,
+            "error": raw_text,
+            "status_code": response.status_code,
+            "trace_id": trace_id,
+        }
+
+    try:
+        data = response.json()
+    except Exception:
+        return {
+            "ok": False,
+            "answer": None,
+            "error": f"El endpoint no devolvió JSON. Content-Type={content_type}. Body={raw_text[:1000]}",
+            "status_code": response.status_code,
+            "trace_id": trace_id,
+        }
+
+    if data.get("error"):
+        return {
+            "ok": False,
+            "answer": None,
+            "error": data["error"],
+            "status_code": response.status_code,
+            "trace_id": trace_id,
+            "raw": data,
+        }
+
+    parsed = extract_final_answer(data)
+
+    if parsed["function_call_count"] > 0 and not parsed["has_final_answer"]:
+        return {
+            "ok": False,
+            "answer": parsed["answer"],
+            "error": (
+                "El agente devolvió function_call pero no una respuesta final. "
+                "Revisa permisos de tools, AI Search index, endpoint del agente o loop de tool-calling."
+            ),
+            "status_code": response.status_code,
+            "trace_id": trace_id,
+            "debug": parsed,
+            "raw": data,
+        }
+
+    return {
+        "ok": True,
+        "answer": parsed["answer"],
+        "status_code": response.status_code,
+        "trace_id": trace_id,
+        "debug": parsed,
+        "raw": data,
+    }

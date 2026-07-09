@@ -1,21 +1,29 @@
+import base64
 import json
 import logging
 import os
+import threading
+import time
 
 import requests
-from databricks.sdk import WorkspaceClient
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# Name of the Databricks serving endpoint. The workspace host is resolved
-# automatically by the SDK: on a Databricks App via the service principal's
-# OAuth, and locally via DATABRICKS_HOST / DATABRICKS_TOKEN.
-ENDPOINT_NAME = "mas-c7a80bc8-endpoint"
-
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("chatmlp")
 
 app = FastAPI(title="ChatMLP API")
+
+# Databricks Apps inject DATABRICKS_HOST / DATABRICKS_CLIENT_ID /
+# DATABRICKS_CLIENT_SECRET automatically for the app's service principal.
+# Locally these can be provided as env vars. They are read lazily (never at
+# import time) so the app still boots without credentials.
+DEFAULT_AGENT_ENDPOINT = "mas-c7a80bc8-endpoint"
+
+
+def agent_endpoint() -> str:
+    return os.environ.get("DATABRICKS_AGENT_ENDPOINT", DEFAULT_AGENT_ENDPOINT)
 
 
 class Message(BaseModel):
@@ -27,119 +35,306 @@ class ChatRequest(BaseModel):
     messages: list[Message]
 
 
-def _extract_answer(data: dict) -> str:
-    """Extract the assistant text from the possible agent response shapes."""
-    # Responses API shape: {"output": [{"content": [{"type": "output_text", "text": ...}]}]}
-    if isinstance(data.get("output"), list):
-        parts = []
-        for output in data["output"]:
-            for content in output.get("content", []) if isinstance(output, dict) else []:
-                if isinstance(content, dict) and content.get("text"):
-                    parts.append(content["text"])
-        if parts:
-            return " ".join(parts)
-
-    # ChatAgent shape: {"messages": [..., {"role": "assistant", "content": ...}]}
-    if isinstance(data.get("messages"), list):
-        for msg in reversed(data["messages"]):
-            if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("content"):
-                return str(msg["content"])
-
-    # Chat completions shape: {"choices": [{"message": {"content": ...}}]}
-    if isinstance(data.get("choices"), list) and data["choices"]:
-        message = data["choices"][0].get("message", {})
-        if message.get("content"):
-            return str(message["content"])
-
-    raise RuntimeError(
-        f"Formato de respuesta no reconocido: {json.dumps(data)[:400]}"
-    )
-
-
 class NoCredentialsError(Exception):
     """Raised when no Databricks credentials are available (local/offline)."""
 
 
-def query_agent(messages: list[dict], trace: list[str]) -> str:
-    """POST directly to the serving endpoint's /invocations URL.
+# ---------------------------------------------------------------------------
+# OAuth M2M (client credentials) with token cache
+# ---------------------------------------------------------------------------
 
-    Auth is handled by the Databricks SDK (OAuth on a Databricks App, env vars
-    locally). The OAuth token expires (~1h), so credentials are resolved
-    per-request and never cached.
+_token_cache: dict = {"access_token": None, "expires_at": 0.0, "key": None}
+_token_lock = threading.Lock()
 
-    Agent Bricks (mas-*) endpoints expect the Responses API schema
-    ``{"input": [...]}``; other agents expect ``{"messages": [...]}``. We try
-    ``input`` first and fall back to ``messages`` if the endpoint rejects it.
 
-    ``trace`` is mutated with a human-readable log of each stage so the
-    front-end can show what was sent and received.
+def get_databricks_token(trace: list[str]) -> tuple[str, str]:
+    """Return (host, access_token) using OAuth M2M client credentials.
+
+    The token is cached until shortly before expiry. Raises NoCredentialsError
+    when the required env vars are missing (e.g. running locally on Replit).
     """
-    try:
-        w = WorkspaceClient()
-        auth_headers = w.config.authenticate()
-        trace.append(
-            f"1. Autenticación OK (método: {w.config.auth_type}, host: {w.config.host})"
-        )
-    except Exception as e:
-        trace.append(f"1. Autenticación FALLÓ: {str(e)[:300]}")
-        raise NoCredentialsError(str(e)) from e
+    host = os.environ.get("DATABRICKS_HOST", "").rstrip("/")
+    client_id = os.environ.get("DATABRICKS_CLIENT_ID", "")
+    client_secret = os.environ.get("DATABRICKS_CLIENT_SECRET", "")
 
-    url = f"{w.config.host.rstrip('/')}/serving-endpoints/{ENDPOINT_NAME}/invocations"
-    headers = {**auth_headers, "Content-Type": "application/json"}
-
-    last_error = None
-    for schema, payload in (("input", {"input": messages}), ("messages", {"messages": messages})):
-        body = json.dumps(payload, ensure_ascii=False)
-        trace.append(f"2. POST {url}")
-        trace.append(f"   Enviado (esquema '{schema}'): {body[:600]}")
-        resp = requests.post(url, headers=headers, json=payload, timeout=120)
-        trace.append(
-            f"3. Respuesta HTTP {resp.status_code} en {resp.elapsed.total_seconds():.1f}s"
-        )
-        trace.append(f"   Recibido: {resp.text[:600]}")
-        if resp.status_code == 200:
-            try:
-                data = resp.json()
-            except ValueError:
-                trace.append("4. ERROR: el cuerpo no es JSON válido")
-                raise RuntimeError(
-                    f"El endpoint no devolvió JSON (HTTP {resp.status_code}): "
-                    f"{resp.text[:400]}"
-                )
-            answer = _extract_answer(data)
-            trace.append("4. Texto extraído correctamente")
-            return answer
-        last_error = f"HTTP {resp.status_code}: {resp.text[:400]}"
-        # Only retry with the alternate schema on client-side schema errors.
-        if resp.status_code not in (400, 422):
-            break
-        if schema == "input":
-            trace.append(
-                f"   Esquema '{schema}' rechazado; reintentando con el otro esquema…"
+    if not host or not client_id or not client_secret:
+        missing = [
+            name
+            for name, val in (
+                ("DATABRICKS_HOST", host),
+                ("DATABRICKS_CLIENT_ID", client_id),
+                ("DATABRICKS_CLIENT_SECRET", client_secret),
             )
-    trace.append("4. ERROR: el endpoint no aceptó la solicitud")
-    raise RuntimeError(last_error)
+            if not val
+        ]
+        trace.append(f"1. Autenticación FALLÓ: faltan variables {', '.join(missing)}")
+        raise NoCredentialsError(f"Faltan variables de entorno: {', '.join(missing)}")
+
+    cache_key = f"{host}|{client_id}"
+    with _token_lock:
+        now = time.time()
+        if (
+            _token_cache["access_token"]
+            and _token_cache["key"] == cache_key
+            and now < _token_cache["expires_at"] - 60
+        ):
+            trace.append("1. Autenticación OK (token OAuth en caché)")
+            return host, _token_cache["access_token"]
+
+        token_url = f"{host}/oidc/v1/token"
+        basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+
+        resp = requests.post(
+            token_url,
+            headers={
+                "Authorization": f"Basic {basic}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            data={"grant_type": "client_credentials", "scope": "all-apis"},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            trace.append(
+                f"1. Autenticación FALLÓ: token endpoint HTTP {resp.status_code}: "
+                f"{resp.text[:300]}"
+            )
+            raise RuntimeError(
+                f"No se pudo obtener token OAuth (HTTP {resp.status_code}): "
+                f"{resp.text[:300]}"
+            )
+
+        token_data = resp.json()
+        _token_cache["access_token"] = token_data["access_token"]
+        _token_cache["expires_at"] = now + int(token_data.get("expires_in", 3600))
+        _token_cache["key"] = cache_key
+        trace.append(f"1. Autenticación OK (OAuth M2M, host: {host})")
+        return host, _token_cache["access_token"]
 
 
+# ---------------------------------------------------------------------------
+# Response parsing
+# ---------------------------------------------------------------------------
+
+WEAK_STARTS = [
+    "voy a consultar",
+    "déjame consultar",
+    "dejame consultar",
+    "voy a buscar",
+    "buscaré",
+    "buscare",
+    "consultaré",
+    "consultare",
+]
+
+
+def is_weak_intermediate_text(text: str) -> bool:
+    lower = text.strip().lower()
+    return any(lower.startswith(x) for x in WEAK_STARTS)
+
+
+def parse_sse_error(text: str):
+    """Databricks can return HTTP 200 with an SSE error block:
+    event: error
+    data: {"error_code": "...", "message": "..."}
+
+    Returns a dict with error_code/message when the data block is JSON,
+    otherwise the raw data string.
+    """
+    if "event: error" not in text:
+        return None
+    for line in text.splitlines():
+        if line.startswith("data:"):
+            raw = line.replace("data:", "", 1).strip()
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return {
+                        "error_code": parsed.get("error_code"),
+                        "message": parsed.get("message") or raw,
+                    }
+            except ValueError:
+                pass
+            return {"error_code": None, "message": raw}
+    return {"error_code": None, "message": text[:400]}
+
+
+def extract_final_answer(data: dict) -> dict:
+    outputs = data.get("output", [])
+    texts: list[str] = []
+    function_calls = []
+
+    for item in outputs:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type == "function_call":
+            function_calls.append(item)
+        if item_type == "message" and item.get("role") == "assistant":
+            for content in item.get("content", []):
+                if isinstance(content, dict) and content.get("type") in (
+                    "output_text",
+                    "text",
+                ):
+                    txt = (content.get("text") or "").strip()
+                    if txt:
+                        texts.append(txt)
+
+    # Only substantive text counts as a final answer. Weak intermediate
+    # snippets ("Voy a consultar...") are NEVER returned as the final answer.
+    substantive = [t for t in texts if not is_weak_intermediate_text(t)]
+    answer = "\n".join(substantive).strip()
+    has_final_answer = bool(substantive)
+
+    return {
+        "answer": answer,
+        "has_final_answer": has_final_answer,
+        "function_call_count": len(function_calls),
+        "assistant_text_count": len(texts),
+        "raw_output_count": len(outputs),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Agent call via Databricks Responses API
+# ---------------------------------------------------------------------------
+
+def ask_databricks_agent(messages: list[dict], trace: list[str]) -> str:
+    host, token = get_databricks_token(trace)
+
+    url = f"{host}/serving-endpoints/responses"
+    endpoint = agent_endpoint()
+    payload = {
+        "model": endpoint,
+        "input": messages,
+        "stream": False,
+        "databricks_options": {"return_trace": True},
+    }
+
+    trace.append(f"2. POST {url} (model: {endpoint})")
+    trace.append(f"   Enviado: {json.dumps(payload, ensure_ascii=False)[:600]}")
+
+    resp = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "x-mlflow-return-trace-id": "true",
+        },
+        json=payload,
+        timeout=120,
+    )
+
+    content_type = resp.headers.get("content-type", "")
+    trace_id = resp.headers.get("x-mlflow-trace-id")
+    raw_text = resp.text
+
+    trace.append(
+        f"3. Respuesta HTTP {resp.status_code} en {resp.elapsed.total_seconds():.1f}s "
+        f"(content-type: {content_type}"
+        + (f", trace-id: {trace_id})" if trace_id else ")")
+    )
+    trace.append(f"   Recibido: {raw_text[:600]}")
+
+    logger.info(
+        "responses API: endpoint=%s status=%s content_type=%s trace_id=%s",
+        endpoint,
+        resp.status_code,
+        content_type,
+        trace_id,
+    )
+
+    sse_error = parse_sse_error(raw_text)
+    if sse_error:
+        code = sse_error.get("error_code")
+        msg = str(sse_error.get("message", ""))[:400]
+        logger.error(
+            "responses API SSE error: endpoint=%s error_code=%s message=%s",
+            endpoint,
+            code,
+            msg,
+        )
+        detail = f"[{code}] {msg}" if code else msg
+        trace.append(f"4. ERROR SSE del endpoint: {detail}")
+        raise RuntimeError(f"Databricks devolvió error SSE: {detail}")
+
+    if resp.status_code >= 400:
+        trace.append("4. ERROR: el endpoint rechazó la solicitud")
+        raise RuntimeError(f"HTTP {resp.status_code}: {raw_text[:400]}")
+
+    try:
+        data = resp.json()
+    except ValueError:
+        trace.append("4. ERROR: el cuerpo no es JSON válido")
+        raise RuntimeError(
+            f"El endpoint no devolvió JSON (content-type: {content_type}): "
+            f"{raw_text[:400]}"
+        )
+
+    if data.get("error"):
+        err = data["error"]
+        trace.append(f"4. ERROR devuelto por el endpoint: {json.dumps(err)[:300]}")
+        raise RuntimeError(f"Error del endpoint: {json.dumps(err)[:300]}")
+
+    parsed = extract_final_answer(data)
+    trace.append(
+        f"4. Análisis: {parsed['raw_output_count']} items, "
+        f"{parsed['function_call_count']} function_call, "
+        f"{parsed['assistant_text_count']} textos assistant, "
+        f"respuesta final: {'sí' if parsed['has_final_answer'] else 'no'}"
+    )
+
+    logger.info(
+        "responses API parsed: endpoint=%s function_calls=%s assistant_texts=%s final=%s",
+        endpoint,
+        parsed["function_call_count"],
+        parsed["assistant_text_count"],
+        parsed["has_final_answer"],
+    )
+
+    if parsed["function_call_count"] > 0 and not parsed["has_final_answer"]:
+        trace.append("5. ERROR: function_call sin respuesta final")
+        raise RuntimeError(
+            "El agente intentó llamar una herramienta pero no devolvió respuesta "
+            "final. Revisa permisos o tool-calling del agente."
+        )
+
+    if not parsed["has_final_answer"]:
+        if parsed["assistant_text_count"] > 0:
+            trace.append("5. ERROR: solo texto intermedio, sin respuesta final")
+            raise RuntimeError(
+                "El agente solo devolvió texto intermedio ('Voy a consultar...') "
+                "sin una respuesta final sustantiva."
+            )
+        trace.append("5. ERROR: el agente no devolvió texto")
+        raise RuntimeError("El agente no devolvió texto en la respuesta.")
+
+    trace.append("5. Respuesta final extraída correctamente")
+    return parsed["answer"]
+
+
+# ---------------------------------------------------------------------------
 # API
+# ---------------------------------------------------------------------------
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok"}
+    configured = bool(
+        os.environ.get("DATABRICKS_HOST")
+        and os.environ.get("DATABRICKS_CLIENT_ID")
+        and os.environ.get("DATABRICKS_CLIENT_SECRET")
+    )
+    return {"status": "ok", "credentials_configured": configured}
 
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
     payload = [m.model_dump() for m in req.messages]
-    trace: list[str] = [f"0. Endpoint destino: {ENDPOINT_NAME}"]
+    trace: list[str] = [f"0. Endpoint destino: {agent_endpoint()} (vía Responses API)"]
 
     try:
-        answer = query_agent(payload, trace)
+        answer = ask_databricks_agent(payload, trace)
         return {"role": "assistant", "type": "text", "content": answer, "trace": trace}
     except NoCredentialsError as e:
-        # No Databricks credentials (e.g. running locally on Replit). The agent
-        # only answers when deployed as a Databricks App, where OAuth is
-        # automatic. This is NOT a demo response — it is an explicit offline state.
         logger.warning("Sin credenciales Databricks: %s", e)
         return {
             "role": "assistant",
@@ -152,13 +347,11 @@ def chat(req: ChatRequest):
             "trace": trace,
         }
     except Exception as e:
-        # Surface the real error (HTTP status + body from the endpoint) instead
-        # of an opaque 500, so problems like missing permissions are visible.
-        logger.exception("Error consultando el endpoint %s", ENDPOINT_NAME)
+        logger.exception("Error consultando el endpoint %s", agent_endpoint())
         return {
             "role": "assistant",
             "type": "text",
-            "content": f"Error consultando el agente ({ENDPOINT_NAME}): {e}",
+            "content": f"Error consultando el agente ({agent_endpoint()}): {e}",
             "trace": trace,
         }
 

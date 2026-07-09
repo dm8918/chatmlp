@@ -1,0 +1,89 @@
+Necesito corregir mi app de chat que consulta un agente de Databricks.
+
+Contexto:
+- La app se desarrolla en Replit y luego se despliega como Databricks App.
+- El agente está desplegado en Databricks Model Serving con este endpoint:
+  mas-c7a80bc8-endpoint
+- El workspace host es:
+  https://adb-8849935324384487.7.azuredatabricks.net
+- Actualmente la app llama a:
+  /serving-endpoints/mas-c7a80bc8-endpoint/invocations
+- El problema es que la respuesta HTTP 200 trae output con function_call y un texto intermedio como "Voy a consultar...", pero no la respuesta final del agente.
+
+Objetivo:
+Modificar la app para llamar al agente usando la ruta Databricks Responses API:
+
+POST {DATABRICKS_HOST}/serving-endpoints/responses
+
+con body:
+
+{
+  "model": "mas-c7a80bc8-endpoint",
+  "input": [
+    {
+      "role": "user",
+      "content": "<mensaje del usuario>"
+    }
+  ],
+  "stream": false,
+  "databricks_options": {
+    "return_trace": true
+  }
+}
+
+Requisitos técnicos:
+
+1. Toda llamada a Databricks debe hacerse desde el backend, nunca desde el frontend.
+
+2. Usar variables de entorno:
+   - DATABRICKS_HOST
+   - DATABRICKS_CLIENT_ID
+   - DATABRICKS_CLIENT_SECRET
+   - DATABRICKS_AGENT_ENDPOINT
+
+3. Implementar autenticación OAuth M2M con Databricks:
+   - Obtener token desde:
+     {DATABRICKS_HOST}/oidc/v1/token
+   - grant_type=client_credentials
+   - scope=all-apis
+   - Usar Basic Auth con client_id y client_secret.
+   - Cachear el access_token hasta antes de su expiración.
+
+4. Llamar al agente con:
+   POST {DATABRICKS_HOST}/serving-endpoints/responses
+
+5. Enviar headers:
+   Authorization: Bearer <access_token>
+   Content-Type: application/json
+   x-mlflow-return-trace-id: true
+
+6. El parser de respuesta debe:
+   - Leer data.output
+   - Extraer textos desde items:
+     item.type == "message"
+     item.role == "assistant"
+     content.type == "output_text"
+   - No considerar como respuesta final textos débiles como:
+     "Voy a consultar..."
+     "Déjame consultar..."
+     "Voy a buscar..."
+   - Si la respuesta contiene function_call pero no contiene respuesta final sustantiva, mostrar error controlado:
+     "El agente intentó llamar una herramienta pero no devolvió respuesta final. Revisa permisos o tool-calling del agente."
+
+7. Si Databricks devuelve SSE aunque HTTP sea 200, por ejemplo:
+   event: error
+   data: {...}
+   la app debe parsear el bloque data y mostrar el error real.
+
+8. Agregar logging de debug en backend:
+   - endpoint llamado
+   - status code
+   - content-type
+   - trace id
+   - si hubo function_call
+   - cantidad de mensajes assistant
+   - error_code y message si existen
+
+9. No exponer tokens, client_secret ni headers al frontend.
+
+10. Mantener compatibilidad para despliegue en Databricks Apps.
