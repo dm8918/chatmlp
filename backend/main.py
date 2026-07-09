@@ -238,6 +238,7 @@ def extract_final_answer(data: dict) -> dict:
         "function_call_count": len(function_calls),
         "assistant_text_count": len(texts),
         "raw_output_count": len(outputs),
+        "texts": texts,
     }
 
 
@@ -275,7 +276,7 @@ def ask_databricks_agent(messages: list[dict], trace: list[str]) -> str:
         f"(content-type: {content_type}"
         + (f", trace-id: {trace_id})" if trace_id else ")")
     )
-    trace.append(f"   Recibido: {raw_text[:600]}")
+    trace.append(f"   Recibido: {raw_text[:1500]}")
 
     logger.info(
         "invocations API: endpoint=%s status=%s content_type=%s trace_id=%s",
@@ -324,6 +325,9 @@ def ask_databricks_agent(messages: list[dict], trace: list[str]) -> str:
         f"{parsed['assistant_text_count']} textos assistant, "
         f"respuesta final: {'sí' if parsed['has_final_answer'] else 'no'}"
     )
+    for i, t in enumerate(parsed["texts"], 1):
+        marker = " ← ELEGIDO como respuesta final" if t.strip() == parsed["answer"] else ""
+        trace.append(f"   Texto {i}: {t[:160]}{'…' if len(t) > 160 else ''}{marker}")
 
     logger.info(
         "invocations API parsed: endpoint=%s function_calls=%s assistant_texts=%s final=%s",
