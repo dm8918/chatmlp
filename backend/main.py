@@ -53,7 +53,9 @@ def get_databricks_token(trace: list[str]) -> tuple[str, str]:
     The token is cached until shortly before expiry. Raises NoCredentialsError
     when the required env vars are missing (e.g. running locally on Replit).
     """
-    host = os.environ.get("DATABRICKS_HOST", "").rstrip("/")
+    host = os.environ.get("DATABRICKS_HOST", "").strip().rstrip("/")
+    if host and not host.startswith(("http://", "https://")):
+        host = f"https://{host}"
     client_id = os.environ.get("DATABRICKS_CLIENT_ID", "")
     client_secret = os.environ.get("DATABRICKS_CLIENT_SECRET", "")
 
