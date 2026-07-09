@@ -1,14 +1,20 @@
 ---
 name: Databricks Apps serving-endpoint auth
-description: How to authenticate a backend to a Databricks agent serving endpoint (OAuth M2M, Responses API) so it survives long-running deploys
+description: How to authenticate and call a Databricks agent serving endpoint (OAuth M2M, per-endpoint /invocations API) so it survives long-running deploys
 ---
 
 # Databricks Apps → agent serving endpoint
 
-This project talks to a Mosaic AI **Agent** endpoint via the raw **Responses
-API** (`POST {host}/serving-endpoints/responses`) using `requests`, NOT the
-databricks-sdk / openai clients (dropped deliberately to keep deps minimal and
-control parsing).
+This project talks to a Mosaic AI **Agent** endpoint via the endpoint's
+**invocations API** (`POST {host}/serving-endpoints/{endpoint}/invocations`,
+body `{"input": [...]}`) using `requests`, NOT the databricks-sdk / openai
+clients (dropped deliberately to keep deps minimal and control parsing).
+
+**Why:** the generic `POST {host}/serving-endpoints/responses` route (with
+`model` in the body) did NOT work for this agent endpoint; the per-endpoint
+`/invocations` URL is what works (verified from a Databricks notebook). The
+response body still has the Responses-API shape (`output` array with
+`message`/`function_call` items).
 
 ## Rule: OAuth M2M with expiry-aware, keyed, locked cache
 Request tokens from `{DATABRICKS_HOST}/oidc/v1/token` (Basic auth with

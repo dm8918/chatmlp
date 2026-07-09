@@ -10,8 +10,11 @@ a Databricks Serving Endpoint, with a FastAPI backend.
   - Conversation history persists in the browser's localStorage.
 - `backend/main.py`: FastAPI app.
   - `POST /api/chat`: sends the conversation to the Databricks agent via the
-    **Responses API** (`POST {host}/serving-endpoints/responses`, body
-    `{model, input, stream: false, databricks_options: {return_trace: true}}`).
+    endpoint's **invocations API**
+    (`POST {host}/serving-endpoints/{endpoint}/invocations`, body `{input}`),
+    the same call shape verified working from a Databricks notebook.
+    (The generic `/serving-endpoints/responses` route did NOT work for this
+    agent endpoint.)
     Returns `{role, type, content, trace}` — `trace` is a step-by-step log
     (auth, request sent, HTTP response, parsing) shown in the UI under
     "Ver seguimiento".

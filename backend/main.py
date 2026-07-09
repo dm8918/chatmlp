@@ -242,22 +242,17 @@ def extract_final_answer(data: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Agent call via Databricks Responses API
+# Agent call via the serving endpoint invocations API
 # ---------------------------------------------------------------------------
 
 def ask_databricks_agent(messages: list[dict], trace: list[str]) -> str:
     host, token = get_databricks_token(trace)
 
-    url = f"{host}/serving-endpoints/responses"
     endpoint = agent_endpoint()
-    payload = {
-        "model": endpoint,
-        "input": messages,
-        "stream": False,
-        "databricks_options": {"return_trace": True},
-    }
+    url = f"{host}/serving-endpoints/{endpoint}/invocations"
+    payload = {"input": messages}
 
-    trace.append(f"2. POST {url} (model: {endpoint})")
+    trace.append(f"2. POST {url}")
     trace.append(f"   Enviado: {json.dumps(payload, ensure_ascii=False)[:600]}")
 
     resp = requests.post(
@@ -283,7 +278,7 @@ def ask_databricks_agent(messages: list[dict], trace: list[str]) -> str:
     trace.append(f"   Recibido: {raw_text[:600]}")
 
     logger.info(
-        "responses API: endpoint=%s status=%s content_type=%s trace_id=%s",
+        "invocations API: endpoint=%s status=%s content_type=%s trace_id=%s",
         endpoint,
         resp.status_code,
         content_type,
@@ -295,7 +290,7 @@ def ask_databricks_agent(messages: list[dict], trace: list[str]) -> str:
         code = sse_error.get("error_code")
         msg = str(sse_error.get("message", ""))[:400]
         logger.error(
-            "responses API SSE error: endpoint=%s error_code=%s message=%s",
+            "invocations API SSE error: endpoint=%s error_code=%s message=%s",
             endpoint,
             code,
             msg,
@@ -331,7 +326,7 @@ def ask_databricks_agent(messages: list[dict], trace: list[str]) -> str:
     )
 
     logger.info(
-        "responses API parsed: endpoint=%s function_calls=%s assistant_texts=%s final=%s",
+        "invocations API parsed: endpoint=%s function_calls=%s assistant_texts=%s final=%s",
         endpoint,
         parsed["function_call_count"],
         parsed["assistant_text_count"],
@@ -378,7 +373,7 @@ def chat(req: ChatRequest):
     payload = [
         msg for msg in (m.model_dump() for m in req.messages) if not is_error_message(msg)
     ]
-    trace: list[str] = [f"0. Endpoint destino: {agent_endpoint()} (vía Responses API)"]
+    trace: list[str] = [f"0. Endpoint destino: {agent_endpoint()} (vía /invocations)"]
     dropped = len(req.messages) - len(payload)
     if dropped:
         trace.append(f"   ({dropped} mensaje(s) de error previos excluidos del contexto)")
