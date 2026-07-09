@@ -14,7 +14,7 @@ logger = logging.getLogger("chatmlp")
 
 app = FastAPI(title="ChatMLP API")
 
-ENDPOINT_NAME = "mas-f80ab72d-endpoint"
+ENDPOINT_NAME = "mas-c7a80bc8-endpoint"
 
 
 class Message(BaseModel):
