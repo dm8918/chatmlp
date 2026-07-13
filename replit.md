@@ -10,47 +10,63 @@ a Databricks Serving Endpoint, with a FastAPI backend.
   - Conversation history persists in the browser's localStorage.
 - `backend/main.py`: FastAPI app (HTTP layer + trace + offline handling).
 - `backend/functions/call_agent_functions.py`: Databricks invocation logic.
-  - `init_workspace_client()`: builds a `WorkspaceClient` (SDK) or returns
-    `None` when auth can't be resolved (e.g. local/Replit).
+  - `init_workspace_client(user_access_token)`: builds a `WorkspaceClient` using
+    `host=Config().host` and `token=<user's forwarded OAuth token>`. Raises
+    `ValueError` if the token is missing.
   - `call_agent(client, endpoint, messages)`: calls the agent via
     `client.api_client.do(POST /serving-endpoints/{endpoint}/invocations,
     body {"input": clean_messages})`. Mirrors the notebook code the user
     verified working.
   - `get_final_message(response)`: returns the LAST assistant message's text
-    from the `output` list (ignores intermediate narration / tool calls).
-  - `POST /api/chat`: runs the above and returns
+    from the `output` list, skipping tool results (items with a `call_id`) and
+    marker payloads like `<name>vector_search_indices</name>`.
+  - `POST /api/chat`: reads the `x-forwarded-access-token` header, builds the
+    per-user client, runs the above and returns
     `{role, type, content, trace, isError}` — `trace` is a step-by-step log
-    (client init, request, response, parsing) shown in the UI under
-    "Ver seguimiento".
-  - `GET /api/health`: reports whether the WorkspaceClient could initialise.
+    (token received, client init, request, FULL response JSON, parsing) shown in
+    the UI under "Ver seguimiento".
+  - `GET /api/health`: reports `user_token_present` (whether the forwarded token
+    header is on the request).
   - In production it also serves the built React app from `frontend/dist`.
 - `app.yaml`: run command for Databricks Apps (`uvicorn backend.main:app`).
 - `requirements.txt`: fastapi, uvicorn, databricks-sdk.
 
-## Auth model
+## Auth model — on-behalf-of-user (OBO)
 
-- The backend uses the **Databricks SDK** (`WorkspaceClient`), which resolves
-  authentication automatically and refreshes short-lived tokens per request.
-  The successfully-created client is cached; a failed init is NOT cached (so a
-  transient failure doesn't pin the app offline until restart).
+    Navegador
+      ↓
+    Databricks Apps reverse proxy
+      ├── autentica al usuario
+      ├── agrega x-forwarded-access-token
+      ↓
+    FastAPI (este backend)
+
+- The Databricks App's reverse proxy authenticates the end user and forwards
+  their OAuth token in the **`x-forwarded-access-token`** header. The backend
+  reads it per request and builds a `WorkspaceClient` with **that user's**
+  identity, so the agent (and the Vector Search / catalog its tools touch) runs
+  with the *user's own* permissions — not the App's service principal. This is
+  what fixes the earlier "no trae nada" symptom (SP lacked read perms).
+- Requires enabling **User Authorization** on the App with the right scopes and
+  user consent; after changing scopes the App must be restarted.
 - Optional env var `DATABRICKS_AGENT_ENDPOINT` (defaults to
   `mas-c7a80bc8-endpoint`).
-- On **Databricks Apps** the service principal credentials are injected
-  automatically — `WorkspaceClient()` needs no extra config.
-- On **Replit / local** there are intentionally NO credentials:
-  `WorkspaceClient()` fails to init → the chat returns an explicit "sin
-  conexión" message (NOT demo data). Real answers only come from Databricks.
-- No tokens/secrets are ever sent to the frontend.
+- On **Replit / local** the header is absent → the chat returns an explicit
+  "sin conexión" message (NOT demo data). Real answers only come from Databricks.
+- The user token is never logged and never sent to the frontend.
 
 ## Response parsing
 
 - `get_final_message` walks the `output` array from the end and returns the
-  text of the last assistant `message` item, so intermediate narration
-  ("Voy a consultar...") and tool calls are naturally skipped.
-- If no assistant message with text exists, it returns "No se encontró una
-  respuesta final del agente." (surfaced to the UI with `isError: true`).
+  text of the last assistant `message` item; it skips tool results (items with a
+  `call_id`) and marker-only payloads (`<name>...</name>`), so intermediate
+  narration and tool calls are ignored.
+- If no substantive assistant message exists, it returns "El agente no generó
+  una respuesta final." (surfaced to the UI with `isError: true`).
 - Assistant error messages are filtered out of the conversation before it is
   sent back to the agent, so past errors never pollute the context.
+- The trace's step 3 includes the **full** response JSON (pretty-printed) so the
+  user can diagnose the agent's raw output in "Ver seguimiento".
 
 ## Running locally (Replit)
 

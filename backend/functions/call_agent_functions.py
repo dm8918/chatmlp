@@ -1,31 +1,54 @@
-"""Databricks agent invocation helpers.
+"""Databricks agent invocation helpers (on-behalf-of-user auth).
 
-This mirrors the code that the user verified working inside a Databricks
-notebook: it relies on the Databricks SDK's ``WorkspaceClient`` to resolve
-authentication automatically (on a Databricks App the service principal's
-credentials are injected; the SDK also refreshes short-lived tokens per
-request). The agent is called through the serving endpoint's ``/invocations``
-route and the final assistant message is extracted from the response.
+Authentication flow::
+
+    Navegador
+      ↓
+    Databricks Apps reverse proxy
+      ├── autentica al usuario
+      ├── agrega x-forwarded-access-token
+      ↓
+    FastAPI (este backend)
+
+The Databricks App's reverse proxy authenticates the end user and forwards
+their OAuth access token in the ``x-forwarded-access-token`` header. The backend
+reads that header and builds a ``WorkspaceClient`` with the *user's* identity, so
+the agent (and any Vector Search / catalog it touches) runs with the user's own
+permissions instead of the App's service principal.
 """
 
+from typing import Any
+
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.core import Config
 
 VALID_ROLES = {"user", "assistant", "system"}
 
 
-def init_workspace_client():
-    """Return a WorkspaceClient, or None when credentials cannot be resolved
-    (e.g. running locally on Replit without Databricks auth configured)."""
-    try:
-        return WorkspaceClient()
-    except Exception:
-        return None
+def init_workspace_client(user_access_token: str) -> WorkspaceClient:
+    """Create a Databricks client using the identity of the user interacting
+    with the App (on-behalf-of-user).
+
+    Raises ``ValueError`` if the forwarded user token is missing.
+    """
+    if not user_access_token:
+        raise ValueError("No se recibió el token OAuth del usuario.")
+
+    config = Config()
+
+    return WorkspaceClient(
+        host=config.host,
+        token=user_access_token,
+    )
 
 
-def clean_conversation(messages: list[dict]) -> list[dict]:
+def clean_conversation(messages: list[dict]) -> list[dict[str, str]]:
     """Keep only well-formed messages with a valid role and non-empty text."""
     return [
-        {"role": message["role"], "content": message["content"]}
+        {
+            "role": message["role"],
+            "content": message["content"].strip(),
+        }
         for message in messages
         if message.get("role") in VALID_ROLES
         and isinstance(message.get("content"), str)
@@ -34,17 +57,15 @@ def clean_conversation(messages: list[dict]) -> list[dict]:
 
 
 def call_agent(
-    workspace_client, endpoint_name: str, messages: list[dict]
-) -> dict:
-    """Send the conversation to the agent serving endpoint via /invocations.
-
-    Returns the parsed response dict, or ``{"error": ...}`` when the client
-    could not be initialised.
-    """
-    if workspace_client is None:
-        return {"error": "No se pudo inicializar el cliente de la API de Databricks"}
-
+    workspace_client: WorkspaceClient,
+    endpoint_name: str,
+    messages: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Send the conversation to the agent serving endpoint via /invocations."""
     clean_messages = clean_conversation(messages)
+
+    if not clean_messages:
+        raise ValueError("No hay mensajes válidos para enviar al agente.")
 
     return workspace_client.api_client.do(
         method="POST",
@@ -54,26 +75,47 @@ def call_agent(
     )
 
 
-def get_final_message(response: dict) -> str:
+def get_final_message(response: dict[str, Any]) -> str:
     """Return the last substantive assistant message text from the response.
 
-    Iterates the ``output`` list from the end so intermediate narration and
-    tool calls are ignored, returning the text of the last assistant message.
+    Iterates the ``output`` list from the end so intermediate narration, tool
+    results (items with a ``call_id``) and marker payloads such as
+    ``<name>vector_search_indices</name>`` are ignored.
     """
     output = response.get("output", []) if isinstance(response, dict) else []
 
     for item in reversed(output):
         if not isinstance(item, dict):
             continue
-        if item.get("type") == "message" and item.get("role") == "assistant":
-            texts = [
-                content.get("text", "")
-                for content in item.get("content", [])
-                if isinstance(content, dict)
-                and content.get("type") == "output_text"
-                and content.get("text")
-            ]
-            if texts:
-                return "\n".join(texts)
 
-    return "No se encontró una respuesta final del agente."
+        if item.get("type") != "message":
+            continue
+
+        if item.get("role") != "assistant":
+            continue
+
+        # Ignorar resultados intermedios de tools.
+        if item.get("call_id"):
+            continue
+
+        texts = [
+            content.get("text", "").strip()
+            for content in item.get("content", [])
+            if isinstance(content, dict)
+            and content.get("type") == "output_text"
+            and content.get("text", "").strip()
+        ]
+
+        if not texts:
+            continue
+
+        text = "\n".join(texts)
+
+        # Ignorar marcadores intermedios como
+        # <name>vector_search_indices</name>.
+        if text.startswith("<name>") and text.endswith("</name>"):
+            continue
+
+        return text
+
+    return "El agente no generó una respuesta final."

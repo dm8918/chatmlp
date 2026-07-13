@@ -2,7 +2,7 @@ import json
 import logging
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -18,10 +18,12 @@ logger = logging.getLogger("chatmlp")
 
 app = FastAPI(title="ChatMLP API")
 
-# On a Databricks App the service principal credentials are injected
-# automatically and the Databricks SDK resolves them with no extra config.
-# Locally (Replit) there are intentionally no credentials, so the client fails
-# to initialise and the chat returns an explicit offline message (no demo data).
+# On-behalf-of-user auth: the Databricks App reverse proxy authenticates the end
+# user and forwards their OAuth token in the "x-forwarded-access-token" header.
+# The backend builds a per-request WorkspaceClient with THAT token, so the agent
+# runs with the user's own permissions. Locally (Replit) the header is absent, so
+# the chat returns an explicit offline message (no demo data).
+USER_TOKEN_HEADER = "x-forwarded-access-token"
 DEFAULT_AGENT_ENDPOINT = "mas-c7a80bc8-endpoint"
 
 
@@ -45,8 +47,11 @@ _ERROR_PREFIXES = (
     "No se pudo obtener respuesta",
     "Sin conexión al agente de Databricks",
     "El agente no devolvió",
+    "El agente no generó una respuesta final",
     "No se encontró una respuesta final del agente",
 )
+
+_NO_FINAL_ANSWER = "El agente no generó una respuesta final."
 
 
 def is_error_message(msg: dict) -> bool:
@@ -56,35 +61,20 @@ def is_error_message(msg: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# WorkspaceClient cache
-# ---------------------------------------------------------------------------
-# Cache only a successfully created client. A transient failure to initialise
-# must NOT be cached, or the app would pin itself into the offline state until
-# a restart.
-_client = None
-
-
-def get_workspace_client():
-    global _client
-    if _client is None:
-        _client = init_workspace_client()
-    return _client
-
-
-# ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
 
 @app.get("/api/health")
-def health():
+def health(request: Request):
     return {
         "status": "ok",
-        "credentials_configured": get_workspace_client() is not None,
+        "auth": "on-behalf-of-user",
+        "user_token_present": bool(request.headers.get(USER_TOKEN_HEADER)),
     }
 
 
 @app.post("/api/chat")
-def chat(req: ChatRequest):
+def chat(req: ChatRequest, request: Request):
     endpoint = agent_endpoint()
     incoming = [m.model_dump() for m in req.messages]
     messages = [m for m in incoming if not is_error_message(m)]
@@ -94,23 +84,40 @@ def chat(req: ChatRequest):
     if dropped:
         trace.append(f"   ({dropped} mensaje(s) de error previos excluidos del contexto)")
 
-    client = get_workspace_client()
-    if client is None:
-        trace.append("1. Cliente Databricks NO inicializado (sin credenciales)")
-        logger.warning("WorkspaceClient no disponible: sin credenciales Databricks")
+    user_access_token = request.headers.get(USER_TOKEN_HEADER)
+    if not user_access_token:
+        trace.append(
+            f"1. Falta el header '{USER_TOKEN_HEADER}' (usuario no autenticado)"
+        )
+        logger.warning("Sin %s: petición no autenticada por Databricks Apps", USER_TOKEN_HEADER)
         return {
             "role": "assistant",
             "type": "text",
             "content": (
                 "Sin conexión al agente de Databricks. Cerebro responde con datos "
-                "reales al desplegarse como Databricks App (autenticación automática "
-                "del service principal)."
+                "reales al desplegarse como Databricks App, que autentica al usuario "
+                "y reenvía su token en el header 'x-forwarded-access-token'."
             ),
             "trace": trace,
             "isError": True,
         }
 
-    trace.append("1. Cliente Databricks inicializado (SDK, auth automática)")
+    trace.append("1. Token de usuario recibido (x-forwarded-access-token)")
+
+    try:
+        client = init_workspace_client(user_access_token)
+    except Exception as e:  # noqa: BLE001 - surface auth/config errors to the UI
+        logger.exception("No se pudo inicializar el WorkspaceClient del usuario")
+        trace.append(f"   ERROR al inicializar el cliente del usuario: {e}")
+        return {
+            "role": "assistant",
+            "type": "text",
+            "content": f"Error consultando el agente ({endpoint}): {e}",
+            "trace": trace,
+            "isError": True,
+        }
+
+    trace.append("   Cliente Databricks inicializado con la identidad del usuario")
 
     clean = clean_conversation(messages)
     trace.append(
@@ -128,17 +135,6 @@ def chat(req: ChatRequest):
             "role": "assistant",
             "type": "text",
             "content": f"Error consultando el agente ({endpoint}): {e}",
-            "trace": trace,
-            "isError": True,
-        }
-
-    if isinstance(response, dict) and response.get("error"):
-        err = response["error"]
-        trace.append(f"3. ERROR devuelto por el endpoint: {json.dumps(err, ensure_ascii=False)[:300]}")
-        return {
-            "role": "assistant",
-            "type": "text",
-            "content": f"Error consultando el agente ({endpoint}): {err}",
             "trace": trace,
             "isError": True,
         }
@@ -173,7 +169,7 @@ def chat(req: ChatRequest):
         assistant_msgs,
     )
 
-    no_final = answer == "No se encontró una respuesta final del agente."
+    no_final = answer == _NO_FINAL_ANSWER
     trace.append(
         f"5. Respuesta final: {answer[:200]}" + ("…" if len(answer) > 200 else "")
     )
