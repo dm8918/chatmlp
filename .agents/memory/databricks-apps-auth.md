@@ -1,45 +1,49 @@
 ---
 name: Databricks Apps serving-endpoint auth
-description: How to authenticate and call a Databricks agent serving endpoint (OAuth M2M, per-endpoint /invocations API) so it survives long-running deploys
+description: How to authenticate and call a Databricks agent serving endpoint from a backend (SDK WorkspaceClient + /invocations) so it survives long-running deploys
 ---
 
 # Databricks Apps → agent serving endpoint
 
-This project talks to a Mosaic AI **Agent** endpoint via the endpoint's
-**invocations API** (`POST {host}/serving-endpoints/{endpoint}/invocations`,
-body `{"input": [...]}`) using `requests`, NOT the databricks-sdk / openai
-clients (dropped deliberately to keep deps minimal and control parsing).
+This project calls a Mosaic AI **Agent** endpoint through the **Databricks SDK**
+`WorkspaceClient`, using its low-level `api_client.do()` to POST to the
+per-endpoint invocations route:
+`POST /serving-endpoints/{endpoint}/invocations` with body `{"input": [...]}`.
 
-**Why:** the generic `POST {host}/serving-endpoints/responses` route (with
-`model` in the body) did NOT work for this agent endpoint; the per-endpoint
-`/invocations` URL is what works (verified from a Databricks notebook). The
-response body still has the Responses-API shape (`output` array with
-`message`/`function_call` items).
+**Why the SDK (not manual OAuth):** an earlier version did manual OAuth M2M
+(`{host}/oidc/v1/token`, client credentials) and hit two problems worth
+remembering: (1) `DATABRICKS_HOST` injected by Databricks Apps has NO scheme, so
+a raw manual URL needs `https://` prepended; (2) statically-cached M2M tokens
+are short-lived (~1h) and expire mid-deploy. `WorkspaceClient()` resolves the
+service principal's credentials automatically on a Databricks App and refreshes
+tokens per request, avoiding both. The user also verified this exact SDK call
+shape works from a Databricks notebook.
 
-## Rule: OAuth M2M with expiry-aware, keyed, locked cache
-Request tokens from `{DATABRICKS_HOST}/oidc/v1/token` (Basic auth with
-client_id:client_secret, `grant_type=client_credentials`, `scope=all-apis`).
-Cache the token but refresh ~60s before expiry, key the cache by
-host|client_id, and guard with a threading lock.
+**Why per-endpoint /invocations (not the generic /responses route):** the
+generic `POST {host}/serving-endpoints/responses` route (with `model` in the
+body) did NOT work for this agent endpoint. The response body still has the
+Responses-API shape (`output` array with `message` / `function_call` items).
 
-**Why:** M2M tokens are short-lived (~1h). A statically captured token makes
-the app work at first, then fail with 401 until restart. An unkeyed cache
-serves a stale token if credentials change; an unlocked cache races under
-concurrent requests.
+## Rule: cache only a successful client, never a failed init
+Module-level `_client` guarded var; on init failure return `None` WITHOUT
+storing it. Caching `None` would pin the app into the offline/error state until
+a restart. This also gives the clean local/offline behavior: no creds →
+`WorkspaceClient()` raises → `None` → controlled "sin conexión" message (never
+demo data).
 
-## Rule: agent responses need defensive parsing
-- The agent can emit `function_call` items plus weak intermediate text
-  ("Voy a consultar...") — never treat weak text as the final answer; return a
-  controlled error if there is no substantive final text.
-- Databricks can return HTTP 200 whose body is an SSE error block
-  (`event: error` / `data: {json}`) — check for it before assuming success and
-  extract `error_code`/`message` from the data JSON.
+## Rule: extract the LAST assistant message as the answer
+The agent narrates progress between tool calls. Walk the `output` list from the
+end and return the text of the last assistant `message` item; intermediate
+narration and tool-call items are naturally skipped. Filter prior assistant
+*error* messages out of the conversation before resending, or they pollute the
+agent's context.
 
 ## Notes
-- On a Databricks App, `DATABRICKS_HOST` / `DATABRICKS_CLIENT_ID` /
-  `DATABRICKS_CLIENT_SECRET` are injected automatically for the App's service
-  principal. Read them lazily (per request), never at import, so the app can
-  boot without credentials (Replit/local shows an offline message).
-- The App's service principal needs *Can Query* on the serving endpoint.
+- The App's service principal needs *Can Query* on the serving endpoint, AND
+  read access to whatever the agent's tools touch (e.g. Vector Search index /
+  catalog+schema). Symptom of missing tool perms: agent runs a function_call
+  but the search returns empty (`<name>vector_search_indices</name>` + `[]`) and
+  "no trae nada" even though the same query works in a user's notebook (the
+  notebook runs as the USER, the App as the service principal).
 - Databricks App only serves the SPA if `frontend/dist` is prebuilt and present
   in the uploaded source; `app.yaml` runs uvicorn but does not build the front.

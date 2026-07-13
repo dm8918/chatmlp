@@ -8,45 +8,49 @@ a Databricks Serving Endpoint, with a FastAPI backend.
 - `frontend/`: React + Vite + TypeScript single-page app (the Cerebro chat UI).
   - Dev server runs on `0.0.0.0:5000` and proxies `/api/*` to the backend.
   - Conversation history persists in the browser's localStorage.
-- `backend/main.py`: FastAPI app.
-  - `POST /api/chat`: sends the conversation to the Databricks agent via the
-    endpoint's **invocations API**
-    (`POST {host}/serving-endpoints/{endpoint}/invocations`, body `{input}`),
-    the same call shape verified working from a Databricks notebook.
-    (The generic `/serving-endpoints/responses` route did NOT work for this
-    agent endpoint.)
-    Returns `{role, type, content, trace}` — `trace` is a step-by-step log
-    (auth, request sent, HTTP response, parsing) shown in the UI under
+- `backend/main.py`: FastAPI app (HTTP layer + trace + offline handling).
+- `backend/functions/call_agent_functions.py`: Databricks invocation logic.
+  - `init_workspace_client()`: builds a `WorkspaceClient` (SDK) or returns
+    `None` when auth can't be resolved (e.g. local/Replit).
+  - `call_agent(client, endpoint, messages)`: calls the agent via
+    `client.api_client.do(POST /serving-endpoints/{endpoint}/invocations,
+    body {"input": clean_messages})`. Mirrors the notebook code the user
+    verified working.
+  - `get_final_message(response)`: returns the LAST assistant message's text
+    from the `output` list (ignores intermediate narration / tool calls).
+  - `POST /api/chat`: runs the above and returns
+    `{role, type, content, trace, isError}` — `trace` is a step-by-step log
+    (client init, request, response, parsing) shown in the UI under
     "Ver seguimiento".
-  - `GET /api/health`: reports whether Databricks credentials are configured.
+  - `GET /api/health`: reports whether the WorkspaceClient could initialise.
   - In production it also serves the built React app from `frontend/dist`.
 - `app.yaml`: run command for Databricks Apps (`uvicorn backend.main:app`).
-- `requirements.txt`: fastapi, uvicorn, requests (no databricks-sdk / openai).
+- `requirements.txt`: fastapi, uvicorn, databricks-sdk.
 
 ## Auth model
 
-- OAuth **M2M client credentials**: the backend requests a token from
-  `{DATABRICKS_HOST}/oidc/v1/token` (Basic auth, `grant_type=client_credentials`,
-  `scope=all-apis`) and caches it until shortly before expiry (thread-safe).
-- Env vars used (read lazily, never at import): `DATABRICKS_HOST`,
-  `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`, and optionally
-  `DATABRICKS_AGENT_ENDPOINT` (defaults to `mas-c7a80bc8-endpoint`).
-- On **Databricks Apps** these env vars are injected automatically for the
-  App's service principal — no manual config needed.
-- On **Replit / local** there are intentionally NO credentials: the chat
-  returns an explicit "sin conexión" message (NOT demo data). There is no demo
-  mode anymore — real answers only come from Databricks.
-- Tokens / client_secret are never sent to the frontend (the trace only logs
-  host, payload and response snippets).
+- The backend uses the **Databricks SDK** (`WorkspaceClient`), which resolves
+  authentication automatically and refreshes short-lived tokens per request.
+  The successfully-created client is cached; a failed init is NOT cached (so a
+  transient failure doesn't pin the app offline until restart).
+- Optional env var `DATABRICKS_AGENT_ENDPOINT` (defaults to
+  `mas-c7a80bc8-endpoint`).
+- On **Databricks Apps** the service principal credentials are injected
+  automatically — `WorkspaceClient()` needs no extra config.
+- On **Replit / local** there are intentionally NO credentials:
+  `WorkspaceClient()` fails to init → the chat returns an explicit "sin
+  conexión" message (NOT demo data). Real answers only come from Databricks.
+- No tokens/secrets are ever sent to the frontend.
 
-## Response parsing (agent quirks)
+## Response parsing
 
-- The agent may return `function_call` items plus weak intermediate text like
-  "Voy a consultar..." — those are NEVER treated as the final answer.
-- If there is a `function_call` but no substantive final text, the backend
-  returns a controlled error about tool-calling/permissions.
-- Databricks may return HTTP 200 with an SSE error block
-  (`event: error` / `data: {...}`); the backend parses `error_code`/`message`.
+- `get_final_message` walks the `output` array from the end and returns the
+  text of the last assistant `message` item, so intermediate narration
+  ("Voy a consultar...") and tool calls are naturally skipped.
+- If no assistant message with text exists, it returns "No se encontró una
+  respuesta final del agente." (surfaced to the UI with `isError: true`).
+- Assistant error messages are filtered out of the conversation before it is
+  sent back to the agent, so past errors never pollute the context.
 
 ## Running locally (Replit)
 
