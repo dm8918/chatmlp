@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 import os
@@ -67,6 +68,22 @@ def redact_secrets(text) -> str:
     return _JWT_RE.sub("***", text)
 
 
+def token_scopes(token: str) -> str | None:
+    """Return the ``scope`` claim of the user's JWT (for diagnostics only).
+
+    Decodes just the (non-secret) payload of the token to reveal which OAuth
+    scopes Databricks Apps included in the downscoped token. Returns ``None`` if
+    the token isn't a readable JWT. The token itself is never logged.
+    """
+    try:
+        payload_b64 = token.split(".")[1]
+        padding = "=" * (-len(payload_b64) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload_b64 + padding))
+        return claims.get("scope")
+    except Exception:
+        return None
+
+
 def is_error_message(msg: dict) -> bool:
     return msg.get("role") == "assistant" and str(msg.get("content", "")).startswith(
         _ERROR_PREFIXES
@@ -116,6 +133,16 @@ def chat(req: ChatRequest, request: Request):
         }
 
     trace.append("1. Token de usuario recibido (x-forwarded-access-token)")
+    scopes = token_scopes(user_access_token)
+    if scopes is not None:
+        has_serving = "serving.serving-endpoints" in scopes
+        trace.append(f"   Scopes del token: {scopes}")
+        trace.append(
+            "   serving.serving-endpoints presente: "
+            + ("SÍ" if has_serving else "NO — falta el scope para invocar el endpoint")
+        )
+    else:
+        trace.append("   (no se pudieron leer los scopes del token)")
 
     try:
         client = init_workspace_client(user_access_token)
