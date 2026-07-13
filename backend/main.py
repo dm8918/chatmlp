@@ -143,8 +143,12 @@ def chat(req: ChatRequest):
             "isError": True,
         }
 
-    raw = json.dumps(response, ensure_ascii=False) if isinstance(response, dict) else str(response)
-    trace.append(f"3. Respuesta recibida: {raw[:1500]}")
+    raw = (
+        json.dumps(response, ensure_ascii=False, indent=2)
+        if isinstance(response, dict)
+        else str(response)
+    )
+    trace.append(f"3. Respuesta recibida (completa):\n{raw}")
 
     output = response.get("output", []) if isinstance(response, dict) else []
     assistant_msgs = sum(
