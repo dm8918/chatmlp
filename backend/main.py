@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
@@ -52,6 +53,18 @@ _ERROR_PREFIXES = (
 )
 
 _NO_FINAL_ANSWER = "El agente no generó una respuesta final."
+
+# The Databricks SDK includes the full request log — with the
+# "Authorization: Bearer <user token>" header and any JWT — in its exception
+# messages. Never surface that to the UI trace. Redact both the Bearer header and
+# any standalone JWT (eyJ...) before displaying an error.
+_BEARER_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]+", re.IGNORECASE)
+_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+")
+
+
+def redact_secrets(text) -> str:
+    text = _BEARER_RE.sub(r"\1***", str(text))
+    return _JWT_RE.sub("***", text)
 
 
 def is_error_message(msg: dict) -> bool:
@@ -108,11 +121,12 @@ def chat(req: ChatRequest, request: Request):
         client = init_workspace_client(user_access_token)
     except Exception as e:  # noqa: BLE001 - surface auth/config errors to the UI
         logger.exception("No se pudo inicializar el WorkspaceClient del usuario")
-        trace.append(f"   ERROR al inicializar el cliente del usuario: {e}")
+        msg = redact_secrets(e)
+        trace.append(f"   ERROR al inicializar el cliente del usuario: {msg}")
         return {
             "role": "assistant",
             "type": "text",
-            "content": f"Error consultando el agente ({endpoint}): {e}",
+            "content": f"Error consultando el agente ({endpoint}): {msg}",
             "trace": trace,
             "isError": True,
         }
@@ -130,11 +144,12 @@ def chat(req: ChatRequest, request: Request):
         response = call_agent(client, endpoint, messages)
     except Exception as e:  # noqa: BLE001 - surface any SDK/HTTP error to the UI
         logger.exception("Error consultando el endpoint %s", endpoint)
-        trace.append(f"3. ERROR al invocar el endpoint: {e}")
+        msg = redact_secrets(e)
+        trace.append(f"3. ERROR al invocar el endpoint: {msg}")
         return {
             "role": "assistant",
             "type": "text",
-            "content": f"Error consultando el agente ({endpoint}): {e}",
+            "content": f"Error consultando el agente ({endpoint}): {msg}",
             "trace": trace,
             "isError": True,
         }
