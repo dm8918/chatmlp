@@ -41,16 +41,36 @@
   color: var(--text);
 }
 
+.msg__trace-steps {
+  margin: 8px 0 0;
+  padding: 0 0 0 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.msg__trace-steps li {
+  padding-left: 4px;
+}
+
+.msg__trace-steps li::marker {
+  color: var(--teal);
+  font-weight: 700;
+}
+
 .msg__trace pre {
-  margin: 6px 0 0;
-  padding: 10px 12px;
+  margin: 0;
+  padding: 9px 12px;
   background: var(--card);
-  border: 1px dashed var(--border);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--teal);
   border-radius: 8px;
   white-space: pre-wrap;
   word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11.5px;
-  line-height: 1.5;
+  line-height: 1.55;
+  color: var(--text);
 }
 
 .msg__text {
@@ -62,5 +82,11 @@
   max-width: 720px;
   font-size: 15px;
   line-height: 1.5;
+}
+
+.msg__text--error {
+  background: color-mix(in srgb, #d64545 12%, var(--card));
+  border-color: color-mix(in srgb, #d64545 45%, var(--border));
+  color: var(--text);
   white-space: pre-wrap;
 }
