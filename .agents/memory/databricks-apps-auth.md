@@ -25,6 +25,22 @@ USER). Running as the user via OBO fixes this without granting the SP broad data
 access. Requires enabling **User Authorization** on the App with the right
 scopes + user consent, and restarting the App after scope changes.
 
+## Rule: force `auth_type="pat"` when building the user client
+On a deployed App the env has the SP's OAuth creds (`DATABRICKS_CLIENT_ID` /
+`DATABRICKS_CLIENT_SECRET`). If you build `WorkspaceClient(host=..., token=...)`
+without pinning the auth method, the SDK sees BOTH oauth (env) and pat (token)
+and fails: `validate: more than one authorization method configured: oauth and
+pat`. Pass `auth_type="pat"` so it uses only the user's forwarded token.
+
+## Rule: declare `oauth_scopes` in app.yaml (least privilege)
+The forwarded user token is **downscoped** to only the scopes the App declares.
+To invoke a serving endpoint the App must declare `serving.serving-endpoints` in
+`app.yaml` under `oauth_scopes:`. Missing it → the invocation returns
+`403 Forbidden — Invalid scope, required scopes: model-serving` even though the
+user has endpoint access. The workspace admin must also have enabled User
+Authorization (Public Preview) and the user must consent; restart the App after
+changing scopes (internal caches can take ~5 min).
+
 **Local/Replit behavior:** the header is absent, so the backend returns a
 controlled "sin conexión" message (never demo data). Even with a fake token
 locally it fails at `Config()` because there is no `DATABRICKS_HOST` — expected;

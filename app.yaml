@@ -5,3 +5,11 @@ command:
   - 0.0.0.0
   - --port
   - "8000"
+
+# On-behalf-of-user (OBO) scopes: these tell Databricks Apps which API scopes to
+# request in the user consent flow and to include in the downscoped token that
+# arrives in the "x-forwarded-access-token" header. Without
+# "serving.serving-endpoints" the agent invocation returns
+# "403 Forbidden — Invalid scope, required scopes: model-serving".
+oauth_scopes:
+  - serving.serving-endpoints
