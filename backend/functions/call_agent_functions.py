@@ -36,9 +36,14 @@ def init_workspace_client(user_access_token: str) -> WorkspaceClient:
 
     config = Config()
 
+    # auth_type="pat" fuerza el uso del token del usuario e ignora las
+    # credenciales OAuth del service principal que Databricks Apps inyecta en el
+    # entorno (DATABRICKS_CLIENT_ID / DATABRICKS_CLIENT_SECRET). Sin esto el SDK
+    # detecta dos métodos de auth (oauth + pat) y falla la validación.
     return WorkspaceClient(
         host=config.host,
         token=user_access_token,
+        auth_type="pat",
     )
 
 
