@@ -50,7 +50,7 @@ a Databricks Serving Endpoint, with a FastAPI backend.
 - Requires enabling **User Authorization** on the App with the right scopes and
   user consent; after changing scopes the App must be restarted.
 - Optional env var `DATABRICKS_AGENT_ENDPOINT` (defaults to
-  `mas-c7a80bc8-endpoint`).
+  `mas-724bb4d1-endpoint`).
 - On **Replit / local** the header is absent → the chat returns an explicit
   "sin conexión" message (NOT demo data). Real answers only come from Databricks.
 - The user token is never logged and never sent to the frontend.
@@ -84,7 +84,7 @@ Two workflows run in parallel:
    to serve at `/` and returns `{"detail":"Not Found"}`. For this reason
    `frontend/dist` is intentionally NOT gitignored so it ships with the deploy.
 3. `app.yaml` runs `uvicorn backend.main:app`, which serves both the API and the
-   built React app. The agent endpoint defaults to `mas-c7a80bc8-endpoint`
+   built React app. The agent endpoint defaults to `mas-724bb4d1-endpoint`
    (override with `DATABRICKS_AGENT_ENDPOINT`).
 4. Grant the App's service principal permission to query the endpoint
    (*Can Query* on the serving endpoint).

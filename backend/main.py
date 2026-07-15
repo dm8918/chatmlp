@@ -26,7 +26,7 @@ app = FastAPI(title="ChatMLP API")
 # runs with the user's own permissions. Locally (Replit) the header is absent, so
 # the chat returns an explicit offline message (no demo data).
 USER_TOKEN_HEADER = "x-forwarded-access-token"
-DEFAULT_AGENT_ENDPOINT = "mas-c7a80bc8-endpoint"
+DEFAULT_AGENT_ENDPOINT = "mas-724bb4d1-endpoint"
 
 
 def agent_endpoint() -> str:
